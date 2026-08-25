@@ -223,17 +223,12 @@ class ClassificationRoutine(LightningModule):
                 num_bins=self.num_bins_cal_err,
                 num_classes=self.num_classes,
             ),
-            "sc/AURC": AURC(),
-            "sc/AUGRC": AUGRC(),
-            "sc/Cov@5Risk": CovAt5Risk(),
-            "sc/Risk@80Cov": RiskAt80Cov(),
         }
         groups = [
             ["cls/Acc"],
             ["cls/Brier"],
             ["cls/NLL"],
             ["cal/ECE", "cal/aECE"],
-            ["sc/AURC", "sc/AUGRC", "sc/Cov@5Risk", "sc/Risk@80Cov"],
         ]
 
         if self.binary_cls:
@@ -245,9 +240,20 @@ class ClassificationRoutine(LightningModule):
             groups.extend([["cls/AUROC", "cls/AUPR"], ["cls/FPR95"]])
 
         cls_metrics = MetricCollection(metrics_dict, compute_groups=groups)
+        sc_metrics = MetricCollection(
+            {
+                "sc/AURC": AURC(),
+                "sc/AUGRC": AUGRC(),
+                "sc/Cov@5Risk": CovAt5Risk(),
+                "sc/Risk@80Cov": RiskAt80Cov(),
+            },
+            compute_groups=[
+                ["sc/AURC", "sc/AUGRC", "sc/Cov@5Risk", "sc/Risk@80Cov"]
+            ],
+        )
         self.val_cls_metrics = cls_metrics.clone(prefix="val/")
-
         self.test_cls_metrics = cls_metrics.clone(prefix="test/")
+        self.test_sc_metrics = sc_metrics.clone(prefix="test/")
 
         if self.post_processing is not None and isinstance(self.post_processing, Conformal):
             self.post_cls_metrics = MetricCollection(
@@ -258,6 +264,7 @@ class ClassificationRoutine(LightningModule):
             )
         elif self.post_processing is not None:
             self.post_cls_metrics = cls_metrics.clone(prefix="test/post/")
+            self.post_sc_metrics = sc_metrics.clone(prefix="test/post/")
 
         self.test_id_entropy = Entropy()
 
@@ -275,6 +282,7 @@ class ClassificationRoutine(LightningModule):
 
         if self.eval_shift:
             self.test_shift_metrics = cls_metrics.clone(prefix="shift/")
+            self.test_shift_sc_metrics = sc_metrics.clone(prefix="shift/")
 
         # metrics for ensembles only
         if self.is_ensemble:
@@ -585,11 +593,17 @@ class ClassificationRoutine(LightningModule):
                 )
 
         if dataloader_idx == 0:
-            # squeeze if binary classification only for binary metrics
-            self.test_cls_metrics.update(
-                probs.squeeze(-1) if self.binary_cls else probs,
-                targets,
-            )
+            # Classification and selective-classification metrics are separated
+            # because the latter consume each method's native uncertainty score.
+            metric_probs = probs.squeeze(-1) if self.binary_cls else probs
+            self.test_cls_metrics.update(metric_probs, targets)
+            if self.post_processing is not None and not isinstance(
+                self.post_processing, Conformal
+            ):
+                base_uncertainty = -probs.max(dim=-1).values
+                self.test_sc_metrics.update(metric_probs, targets, base_uncertainty)
+            else:
+                self.test_sc_metrics.update(metric_probs, targets, ood_scores)
             self.test_id_entropy.update(probs)
 
             if self.eval_grouping_loss:
@@ -605,6 +619,8 @@ class ClassificationRoutine(LightningModule):
 
             if self.post_processing is not None:
                 self.post_cls_metrics.update(pp_probs, targets)
+                if not isinstance(self.post_processing, Conformal):
+                    self.post_sc_metrics.update(pp_probs, targets, ood_scores)
 
         if self.eval_ood and dataloader_idx == 1:
             self.test_ood_metrics.update(ood_scores, torch.ones_like(targets))
@@ -615,6 +631,7 @@ class ClassificationRoutine(LightningModule):
 
         if self.eval_shift and dataloader_idx == (2 if self.eval_ood else 1):
             self.test_shift_metrics.update(probs, targets)
+            self.test_shift_sc_metrics.update(probs, targets, ood_scores)
             if self.is_ensemble:
                 self.test_shift_ens_metrics.update(probs_per_est)
 
@@ -638,12 +655,14 @@ class ClassificationRoutine(LightningModule):
 
     def on_test_epoch_end(self) -> None:
         """Compute, log, and plot the values of the collected metrics in `test_step`."""
-        result_dict = self.test_cls_metrics.compute() | {
+        result_dict = self.test_cls_metrics.compute() | self.test_sc_metrics.compute() | {
             "test/cls/Entropy": self.test_id_entropy.compute()
         }
 
         if self.post_processing is not None and self.log_post_processing:
             result_dict |= self.post_cls_metrics.compute()
+            if not isinstance(self.post_processing, Conformal):
+                result_dict |= self.post_sc_metrics.compute()
 
         if self.eval_grouping_loss:
             result_dict |= self.test_grouping_loss.compute()
@@ -659,7 +678,7 @@ class ClassificationRoutine(LightningModule):
                 result_dict |= self.test_ood_ens_metrics.compute()
 
         if self.eval_shift:
-            result_dict |= self.test_shift_metrics.compute() | {
+            result_dict |= self.test_shift_metrics.compute() | self.test_shift_sc_metrics.compute() | {
                 "shift/severity": self.trainer.datamodule.shift_severity,
             }
 
@@ -670,9 +689,12 @@ class ClassificationRoutine(LightningModule):
 
         # reset metrics
         self.test_cls_metrics.reset()
+        self.test_sc_metrics.reset()
         self.test_id_entropy.reset()
         if self.post_processing is not None:
             self.post_cls_metrics.reset()
+            if not isinstance(self.post_processing, Conformal):
+                self.post_sc_metrics.reset()
         if self.eval_grouping_loss:
             self.test_grouping_loss.reset()
         if self.is_ensemble:
@@ -684,6 +706,7 @@ class ClassificationRoutine(LightningModule):
                 self.test_ood_ens_metrics.reset()
         if self.eval_shift:
             self.test_shift_metrics.reset()
+            self.test_shift_sc_metrics.reset()
             if self.is_ensemble:
                 self.test_shift_ens_metrics.reset()
 

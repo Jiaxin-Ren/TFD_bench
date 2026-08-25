@@ -34,9 +34,16 @@ from analysis.visualization.uncertainty import generate_uncertainty_plot
 
 
 PLOT_METRICS = {
-    "test/cls/Acc": {"label": "ACC", "scale": 100, "higher_better": True},
-    "test/cal/ECE": {"label": "ECE", "scale": 100, "higher_better": False},
-    "ood/AUROC": {"label": "AUROC", "scale": 100, "higher_better": True},
+    "test/cls/Acc": {"label": "ACC", "scale": 100, "higher_better": True, "unit": "Percent (%)"},
+    "test/cal/ECE": {"label": "ECE", "scale": 100, "higher_better": False, "unit": "Percent (%)"},
+    "ood/AUROC": {"label": "AUROC", "scale": 100, "higher_better": True, "unit": "Percent (%)"},
+}
+
+SELECTIVE_METRICS = {
+    "test/sc/AURC": {"label": "AURC", "scale": 1, "higher_better": False, "unit": "Score"},
+    "test/sc/AUGRC": {"label": "AUGRC", "scale": 1, "higher_better": False, "unit": "Score"},
+    "test/sc/Cov@5Risk": {"label": "Cov@5%Risk", "scale": 100, "higher_better": True, "unit": "Percent (%)"},
+    "test/sc/Risk@80Cov": {"label": "Risk@80%Cov", "scale": 1, "higher_better": False, "unit": "Score"},
 }
 
 CONFORMAL_METHODS = {"conformal_aps", "conformal_raps", "conformal_thr"}
@@ -50,23 +57,25 @@ def load_results(path: str | Path) -> dict:
 def _config_sort_key(config: str) -> tuple[int, str, int]:
     if config == "clean":
         return (0, "", 0)
+    if config == "operating_shift":
+        return (1, "", 0)
     match = re.fullmatch(r"(.+)_s(\d+)", config)
     if match:
-        return (1, match.group(1), int(match.group(2)))
-    return (2, config, 0)
+        return (2, match.group(1), int(match.group(2)))
+    return (3, config, 0)
 
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
 
 
-def _group_results(results: dict) -> dict:
+def _group_results(results: dict, metric_definitions: dict = PLOT_METRICS) -> dict:
     """Return method metrics grouped by dataset/backbone/test configuration."""
     groups: dict[tuple[str, str, str], dict[str, dict[str, float]]] = defaultdict(dict)
     for stats in results.values():
         metrics = stats.get("metrics", {})
         values = {}
-        for metric, config in PLOT_METRICS.items():
+        for metric, config in metric_definitions.items():
             metric_stats = metrics.get(metric)
             if metric_stats is None:
                 break
@@ -78,7 +87,7 @@ def _group_results(results: dict) -> dict:
                 "mean": float(mean) * config["scale"],
                 "std": float(std or 0.0) * config["scale"],
             }
-        if len(values) != len(PLOT_METRICS):
+        if len(values) != len(metric_definitions):
             continue
 
         group_key = (
@@ -99,18 +108,22 @@ def _save_figure(fig: plt.Figure, path: Path, dpi: int) -> None:
     print(f"Saved: {path}")
 
 
-def _plot_metric_panels(methods: dict[str, dict[str, float]], title: str) -> plt.Figure:
-    """Plot ACC, ECE, and AUROC on independent axes so every metric is legible."""
+def _plot_metric_panels(
+    methods: dict[str, dict[str, float]],
+    title: str,
+    metric_definitions: dict = PLOT_METRICS,
+) -> plt.Figure:
+    """Plot each metric on an independent axis so every scale is legible."""
     method_names = sorted(methods)
     y = np.arange(len(method_names))
     fig, axes = plt.subplots(
         1,
-        len(PLOT_METRICS),
-        figsize=(15, max(6, 0.42 * len(method_names))),
+        len(metric_definitions),
+        figsize=(max(15, 5 * len(metric_definitions)), max(6, 0.42 * len(method_names))),
         sharey=True,
     )
 
-    for ax, metric_config in zip(axes, PLOT_METRICS.values()):
+    for ax, metric_config in zip(axes, metric_definitions.values()):
         label = metric_config["label"]
         values = np.asarray([methods[method][label]["mean"] for method in method_names])
         errors = np.asarray([methods[method][label]["std"] for method in method_names])
@@ -142,7 +155,7 @@ def _plot_metric_panels(methods: dict[str, dict[str, float]], title: str) -> plt
         ax.set_xlim(float(values.min() - margin), float(values.max() + margin))
         direction = "↑" if metric_config["higher_better"] else "↓"
         ax.set_title(f"{label} {direction}")
-        ax.set_xlabel("Percent (%)")
+        ax.set_xlabel(metric_config["unit"])
         ax.set_yticks(y)
         ax.grid(True, axis="x", alpha=0.3)
         ax.invert_yaxis()
@@ -154,7 +167,13 @@ def _plot_metric_panels(methods: dict[str, dict[str, float]], title: str) -> plt
     return fig
 
 
-def _plot_noise_trends(groups: dict, output_dir: Path, dpi: int) -> int:
+def _plot_noise_trends(
+    groups: dict,
+    output_dir: Path,
+    dpi: int,
+    metric_definitions: dict = PLOT_METRICS,
+    suffix: str = "",
+) -> int:
     by_benchmark = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
     clean = defaultdict(dict)
     for (dataset, backbone, config), methods in groups.items():
@@ -170,28 +189,28 @@ def _plot_noise_trends(groups: dict, output_dir: Path, dpi: int) -> int:
     count = 0
     for (dataset, backbone), noise_types in sorted(by_benchmark.items()):
         for noise, methods in sorted(noise_types.items()):
-            fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharex=True)
+            fig, axes = plt.subplots(1, len(metric_definitions), figsize=(5 * len(metric_definitions), 6), sharex=True)
             colors = plt.cm.tab20(np.linspace(0, 1, max(len(methods), 1)))
             for method_index, method in enumerate(sorted(methods)):
                 severities = dict(methods[method])
                 if method in clean[(dataset, backbone)]:
                     severities[0] = clean[(dataset, backbone)][method]
                 x = np.asarray(sorted(severities))
-                for ax, metric_config in zip(axes, PLOT_METRICS.values()):
+                for ax, metric_config in zip(axes, metric_definitions.values()):
                     label = metric_config["label"]
                     means = np.asarray([severities[s][label]["mean"] for s in x])
                     stds = np.asarray([severities[s][label]["std"] for s in x])
                     ax.plot(x, means, marker="o", linewidth=1.4, color=colors[method_index], label=method)
                     ax.fill_between(x, means - stds, means + stds, color=colors[method_index], alpha=0.08)
-            for ax, metric_config in zip(axes, PLOT_METRICS.values()):
+            for ax, metric_config in zip(axes, metric_definitions.values()):
                 direction = "↑" if metric_config["higher_better"] else "↓"
-                ax.set(title=f"{metric_config['label']} {direction}", xlabel="Severity (0 = clean)", ylabel="Percent (%)")
+                ax.set(title=f"{metric_config['label']} {direction}", xlabel="Severity (0 = clean)", ylabel=metric_config["unit"])
                 ax.set_xticks(range(6))
                 ax.grid(True, alpha=0.3)
             axes[-1].legend(fontsize=8, bbox_to_anchor=(1.02, 1), loc="upper left")
             fig.suptitle(f"{dataset} / {backbone} — {noise}", fontsize=14)
             fig.tight_layout(rect=(0, 0, 0.9, 0.95))
-            path = output_dir / _safe_name(dataset) / _safe_name(backbone) / f"noise_{_safe_name(noise)}.png"
+            path = output_dir / _safe_name(dataset) / _safe_name(backbone) / f"noise_{_safe_name(noise)}{suffix}.png"
             _save_figure(fig, path, dpi)
             count += 1
     return count
@@ -213,8 +232,9 @@ def generate_all_plots(
         }
     output_path = Path(output_dir)
     groups = _group_results(results)
-    if not groups:
-        raise ValueError("No ACC/ECE/AUROC records were found in the summary file.")
+    selective_groups = _group_results(results, SELECTIVE_METRICS)
+    if not groups and not selective_groups:
+        raise ValueError("No benchmark metrics were found in the summary file.")
 
     metric_labels = [config["label"] for config in PLOT_METRICS.values()]
     higher_better = {
@@ -251,15 +271,62 @@ def generate_all_plots(
         )
         _save_figure(heatmap, group_dir / f"{_safe_name(config)}_heatmap.png", dpi)
         figure_count += 2
+    for (dataset, backbone, config), methods in sorted(
+        selective_groups.items(),
+        key=lambda item: (item[0][0], item[0][1], _config_sort_key(item[0][2])),
+    ):
+        title = f"{dataset} / {backbone} / {config} — Selective classification"
+        group_dir = output_path / _safe_name(dataset) / _safe_name(backbone)
+        selective = _plot_metric_panels(methods, title, SELECTIVE_METRICS)
+        _save_figure(
+            selective,
+            group_dir / f"{_safe_name(config)}_selective.png",
+            dpi,
+        )
+        figure_count += 1
+
 
     figure_count += _plot_noise_trends(groups, output_path, dpi)
+    figure_count += _plot_noise_trends(
+        selective_groups, output_path, dpi, SELECTIVE_METRICS, "_selective"
+    )
     artifact_root = Path(results_dir) if results_dir else _PROJECT_ROOT / "results"
+    for (dataset, backbone, config), _ in sorted(
+        selective_groups.items(),
+        key=lambda item: (item[0][0], item[0][1], _config_sort_key(item[0][2])),
+    ):
+        group_dir = output_path / _safe_name(dataset) / _safe_name(backbone)
+        risk_methods = sorted({
+            stats.get("method")
+            for stats in results.values()
+            if stats.get("dataset") == dataset
+            and stats.get("backbone") == backbone
+            and stats.get("config", "clean") == config
+            and stats.get("method")
+        })
+        filename = (
+            "risk_coverage.png"
+            if config == "clean"
+            else f"{_safe_name(config)}_risk_coverage.png"
+        )
+        try:
+            fig = generate_risk_coverage_plot(
+                artifact_root,
+                dataset,
+                backbone,
+                config=config,
+                methods=risk_methods,
+            )
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            print(f"Skipped {dataset}/{backbone}/{filename}: {error}")
+            continue
+        _save_figure(fig, group_dir / filename, dpi)
+        figure_count += 1
     clean_benchmarks = sorted({(dataset, backbone) for dataset, backbone, config in groups if config == "clean"})
     diagnostics = (
         ("reliability.png", generate_reliability_plot),
         ("roc_pr.png", generate_roc_plot),
         ("ood_scores.png", generate_uncertainty_plot),
-        ("risk_coverage.png", generate_risk_coverage_plot),
         ("seed_stability.png", generate_seed_stability_plot),
     )
     for dataset, backbone in clean_benchmarks:

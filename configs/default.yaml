@@ -3,24 +3,21 @@
 
 # Run every selected dataset × method × backbone combination.
 methods:
-  - max_softmax
-  - deep_ensemble
-  - packed_ensemble
-  - batch_ensemble
-  - snapshot_ensemble
-  - checkpoint_ensemble
-  - variational_bnn
-  - swag
-  - sgld
+  # - max_softmax
+  # - deep_ensemble
+  # - packed_ensemble
+  # - batch_ensemble
+  # - snapshot_ensemble
+  # - checkpoint_ensemble
+  # - variational_bnn
+  # - swag
+  # - sgld
   - sghmc
-  - edl
-  - conformal_aps
-  - conformal_raps
-  - conformal_thr
-  - temperature_scaling
-  - laplace_approx
-  - mc_dropout
-  - mc_batch_norm
+  # - edl
+  # - temperature_scaling
+  # - laplace_approx
+  # - mc_dropout
+  # - mc_batch_norm
 
 # ResNet is supported by all methods. Add transformer, lenet, mlp, lstm, or
 # timesnet only after confirming that a method provides that variant.
@@ -30,11 +27,11 @@ backbones:
 datasets:
   - name: seu
     root: /mnt/d/Data/Machine/SEU
-  - name: mgb
-    root: /mnt/d/Data/Machine/MGB
+  # - name: mgb
+  #   root: /mnt/d/Data/Machine/MGB
 
 training:
-  epochs: 100
+  epochs: 50
   batch_size: 128
   learning_rate: 0.001
   seeds: [0, 1, 2, 3, 4]
@@ -43,6 +40,7 @@ training:
 
 evaluation:
   noise: true
+  shift: true
 
 hardware:
   accelerator: auto
@@ -71,28 +69,28 @@ method_args:
     cycle_length: 5
   variational_bnn:
     kl_weight: 0.0001
-    num_samples: 3
+    num_samples: 10
     ood_criterion: mi
   swag:
     cycle_start: 25
     cycle_length: 1
-    num_estimators: 16
+    num_estimators: 10
   sgld:
     pretrain_epochs: 20
     pretrain_lr: 0.001
     cycle_start: 5
     cycle_length: 5
     noise_factor: 0.01
-    num_estimators: 16
+    num_estimators: 10
   sghmc:
     pretrain_epochs: 20
     pretrain_lr: 0.01
-    cycle_start: 20
-    cycle_length: 5
+    cycle_start: 10
+    cycle_length: 4
     friction: 0.05
     burn_in_steps: 200
     noise_factor: 0.01
-    num_estimators: 16
+    num_estimators: 10
   edl:
     reg_weight: 0.01
     weight_decay: 0.005
@@ -121,7 +119,7 @@ method_args:
     num_estimators: 10
     ood_criterion: mi
   mc_batch_norm:
-    num_estimators: 8
+    num_estimators: 10
     mc_batch_size: 4
     last_only: true
 

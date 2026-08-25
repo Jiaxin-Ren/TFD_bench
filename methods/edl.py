@@ -48,7 +48,7 @@ def run_once(args, seed, run_dir):
                 lr=args.lr,
                 weight_decay=args.weight_decay,
             ),
-            eval_ood=True, ood_criterion="evidential",
+            eval_ood=True, eval_shift=args.eval_shift, ood_criterion="evidential",
         )
     return fit_and_evaluate(args, run_dir, build)
 

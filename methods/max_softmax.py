@@ -21,13 +21,13 @@ METHOD_NAME = "max_softmax"
 
 
 def run_once(args, seed, run_dir):
-    datamodule = get_datamodule(args, val_split=args.val_split, eval_ood=True)
+    datamodule = get_datamodule(args, val_split=args.val_split, eval_ood=True, eval_shift=args.eval_shift)
     model = get_model(args.backbone, datamodule.num_channels, datamodule.num_classes)
     routine = ClassificationRoutine(
         model=model, num_classes=datamodule.num_classes,
         loss=nn.CrossEntropyLoss(),
         optim_recipe=optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3),
-        eval_ood=True, ood_criterion=MaxSoftmaxCriterion(),
+        eval_ood=True, eval_shift=args.eval_shift, ood_criterion=MaxSoftmaxCriterion(),
     )
     trainer = make_trainer(args, run_dir)
     if args.ckpt is None:

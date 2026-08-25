@@ -153,6 +153,11 @@ def add_common_args(parser: argparse.ArgumentParser, config_path: str = None) ->
                         help="评估噪声鲁棒性")
     parser.add_argument("--no-eval-noise", dest="eval_noise", action="store_false",
                         help="禁用噪声鲁棒性评估")
+    parser.add_argument("--eval-shift", "--eval_shift", dest="eval_shift", action="store_true",
+                        default=evaluation_cfg.get("shift", dataset_cfg.get("eval_shift", False)),
+                        help="评估运行工况引起的分布偏移")
+    parser.add_argument("--no-eval-shift", dest="eval_shift", action="store_false",
+                        help="禁用运行工况分布偏移评估")
     parser.add_argument("--output-dir", type=str,
                         default=config.get("output", {}).get("dir", "results"),
                         help="Experiment output directory / 实验输出目录")

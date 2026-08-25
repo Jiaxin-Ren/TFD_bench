@@ -22,10 +22,23 @@ from analysis.visualization.io import (
 )
 
 
-def _risk_coverage(probs: np.ndarray, targets: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    confidence = probs.max(axis=1)
+def _risk_coverage(
+    probs: np.ndarray,
+    targets: np.ndarray,
+    uncertainty: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Build the curve by accepting the least uncertain predictions first."""
+    uncertainty = np.asarray(uncertainty).reshape(-1)
+    if len(uncertainty) != len(targets):
+        raise ValueError("Expected one native uncertainty score per target.")
+    finite = np.isfinite(uncertainty)
+    probs = probs[finite]
+    targets = targets[finite]
+    uncertainty = uncertainty[finite]
+    if not len(targets):
+        raise ValueError("No finite native uncertainty scores are available.")
     errors = (probs.argmax(axis=1) != targets).astype(float)
-    order = np.argsort(-confidence, kind="stable")
+    order = np.argsort(uncertainty, kind="stable")
     errors = errors[order]
     coverage = np.arange(1, len(errors) + 1, dtype=float) / len(errors)
     risk = np.cumsum(errors) / np.arange(1, len(errors) + 1)
@@ -53,7 +66,9 @@ def generate_risk_coverage_plot(
         curves, aurcs = [], []
         for _, arrays in seed_runs:
             coverage, risk, aurc = _risk_coverage(
-                primary_probs(arrays, "id"), arrays["id_targets"].astype(int)
+                primary_probs(arrays, "id"),
+                arrays["id_targets"].astype(int),
+                arrays["id_ood_scores"],
             )
             curve = np.interp(grid, coverage, risk, left=risk[0], right=risk[-1])
             curves.append(curve)
@@ -75,7 +90,7 @@ def generate_risk_coverage_plot(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", default=str(_PROJECT_ROOT / "results"))
-    parser.add_argument("--dataset", default="mgb")
+    parser.add_argument("--dataset", default="seu")
     parser.add_argument("--backbone", default="resnet")
     parser.add_argument("--config", default="clean")
     parser.add_argument("--methods", nargs="+")

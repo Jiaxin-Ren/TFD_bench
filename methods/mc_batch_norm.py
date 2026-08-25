@@ -33,7 +33,7 @@ def run_once(args, seed, run_dir):
     mc_model.fit(datamodule.train_dataloader())
     routine = ClassificationRoutine(
         model=mc_model, num_classes=datamodule.num_classes,
-        loss=nn.CrossEntropyLoss(), is_ensemble=True, eval_ood=True,
+        loss=nn.CrossEntropyLoss(), is_ensemble=True, eval_ood=True, eval_shift=args.eval_shift,
         ood_criterion=MutualInformationCriterion(),
     )
     return evaluate(args, trainer, routine, datamodule)

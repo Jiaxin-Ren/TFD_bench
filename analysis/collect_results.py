@@ -17,6 +17,16 @@ import numpy as np
 _PROJECT_ROOT = Path(__file__).parent.parent
 
 DISPLAY_METRICS = ("test/cls/Acc", "test/cal/ECE", "ood/AUROC")
+CONFIG_ALIASES = {
+    "shift": "operating_shift",
+    "operating_condition_shift": "operating_shift",
+}
+
+
+def normalize_test_config(config: str | None) -> str:
+    """Return the public configuration name used by summaries and tables."""
+    normalized = (config or "clean").strip()
+    return CONFIG_ALIASES.get(normalized, normalized)
 
 
 def _read_standard_metrics(
@@ -39,7 +49,7 @@ def _read_standard_metrics(
 
     records = []
     for row in rows:
-        test_config = row.get("config") or "clean"
+        test_config = normalize_test_config(row.get("config"))
         # Temperature scaling records both the uncalibrated baseline and the
         # calibrated result. Only the latter represents this method in method
         # comparison tables.
@@ -47,10 +57,16 @@ def _read_standard_metrics(
             if test_config.startswith(("baseline_", "before_")):
                 continue
             if test_config.startswith("after_"):
-                test_config = test_config.removeprefix("after_")
+                test_config = normalize_test_config(
+                    test_config.removeprefix("after_")
+                )
         metrics = {}
         for key, value in row.items():
-            if key in {"seed", "config"} or not value:
+            if key in {"seed", "config"}:
+                continue
+            if not value:
+                if key.endswith("/sc/Cov@5Risk"):
+                    metrics[key] = 0.0
                 continue
             try:
                 parsed = float(value)
@@ -83,6 +99,8 @@ def collect_from_results_dir(
     backbone: str | None = None,
     method: str | None = None,
 ) -> List[Dict[str, Any]]:
+    if test_config != "all":
+        test_config = normalize_test_config(test_config)
     results_path = Path(results_dir)
     all_results = []
     if not results_path.exists():
@@ -203,8 +221,11 @@ def main():
     )
     parser.add_argument("--output", default=str(_PROJECT_ROOT / "results" / "summary.json"))
     parser.add_argument("--format", default="json", choices=["json", "csv"])
-    parser.add_argument("--test-config", default="all",
-                        help="clean, gaussian_s1, ..., or all")
+    parser.add_argument(
+        "--test-config",
+        default="all",
+        help="clean, operating_shift, gaussian_s1, ..., or all",
+    )
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--backbone", default=None)
     parser.add_argument("--method", default=None)

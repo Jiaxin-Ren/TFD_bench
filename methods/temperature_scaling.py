@@ -25,7 +25,7 @@ def run_once(args, seed, run_dir):
     trainer, datamodule, model = train_base_classifier(args, run_dir)
     raw_routine = ClassificationRoutine(
         model=model, num_classes=datamodule.num_classes,
-        loss=nn.CrossEntropyLoss(), eval_ood=True,
+        loss=nn.CrossEntropyLoss(), eval_ood=True, eval_shift=args.eval_shift,
     )
     baseline = evaluate(args, trainer, raw_routine, datamodule, artifact_prefix="baseline_")
 
@@ -40,7 +40,7 @@ def run_once(args, seed, run_dir):
     scaler.fit = lambda *args, **kwargs: None
     scaled_routine = ClassificationRoutine(
         model=model, num_classes=datamodule.num_classes,
-        loss=nn.CrossEntropyLoss(), eval_ood=True,
+        loss=nn.CrossEntropyLoss(), eval_ood=True, eval_shift=args.eval_shift,
         post_processing=scaler, log_post_processing=True,
         ood_criterion="post_processing",
     )

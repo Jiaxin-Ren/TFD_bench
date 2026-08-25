@@ -252,7 +252,7 @@ def train_base_classifier(
     model_kwargs: Mapping[str, Any] | None = None,
 ):
     """Train a deterministic base classifier and restore its best weights."""
-    datamodule = get_datamodule(args, val_split=args.val_split, eval_ood=True)
+    datamodule = get_datamodule(args, val_split=args.val_split, eval_ood=True, eval_shift=args.eval_shift)
     model = get_model(
         args.backbone,
         datamodule.num_channels,
@@ -289,7 +289,7 @@ def train_postprocess_and_evaluate(
         model=model,
         num_classes=datamodule.num_classes,
         loss=None,
-        eval_ood=True,
+        eval_ood=True, eval_shift=args.eval_shift,
         post_processing=postprocess,
         log_post_processing=True,
         ood_criterion=ood_criterion or "msp",
@@ -307,62 +307,128 @@ def evaluate(
     on_config: Callable[[str], None] | None = None,
     artifact_prefix: str = "",
 ) -> Results:
-    """Evaluate clean and configured noisy ID/OOD sets."""
+    """Evaluate clean, operating-shift, and configured noisy conditions."""
     results: Results = {}
-    # Benchmark metrics are persisted once by ``run_repeated``.  Some legacy
-    # routines still request TorchUncertainty's per-test CSV writer; disabling
-    # it here prevents a second, incompatible ``logs/results.csv`` artifact.
+    # Benchmark metrics are persisted once by ``run_repeated``. Some legacy
+    # routines still request a second, incompatible per-test CSV artifact.
     routine.save_in_csv = False
     routine.collect_predictions = True
-    if on_config:
-        on_config("clean")
-    clean_metrics = trainer.test(
-        model=routine,
-        datamodule=datamodule,
-        ckpt_path=ckpt_path,
-    )[0]
-    results["clean"] = add_ood_source_metrics(clean_metrics, routine, datamodule)
-    save_prediction_artifacts(
-        trainer, routine, f"{artifact_prefix}clean", datamodule
-    )
 
-    if not getattr(args, "eval_noise", False):
-        return results
-
-    required = ("noise_params", "get_noisy_test_set", "get_noisy_ood_set")
-    missing = [name for name in required if not hasattr(datamodule, name)]
-    if missing:
-        raise NotImplementedError(
-            f"{type(datamodule).__name__} does not support noise evaluation "
-            f"({', '.join(missing)} missing). Run with --no-eval-noise."
+    shift_requested = bool(getattr(args, "eval_shift", False))
+    datamodule_shift_state = bool(getattr(datamodule, "eval_shift", False))
+    routine_shift_state = bool(getattr(routine, "eval_shift", False))
+    if shift_requested and not (datamodule_shift_state and routine_shift_state):
+        raise RuntimeError(
+            "Shift evaluation was requested, but it was not enabled on both "
+            "the data module and classification routine."
         )
 
-    for noise_type in datamodule.noise_params:
-        for severity in range(1, 6):
-            config = f"{noise_type}_s{severity}"
+    operating_shift_set = None
+    if shift_requested:
+        if not hasattr(datamodule, "get_shift_set"):
+            raise NotImplementedError(
+                f"{type(datamodule).__name__} does not support "
+                "operating-condition shift evaluation."
+            )
+        # Build and cache the shift set before suppressing its auxiliary loader.
+        datamodule.setup("test")
+        operating_shift_set = datamodule.get_shift_set()
+
+    # The operating-condition shift is evaluated once as the primary test set.
+    # Suppress the auxiliary shift loader during clean and noise evaluations.
+    datamodule.eval_shift = False
+    routine.eval_shift = False
+    try:
+        if on_config:
+            on_config("clean")
+        clean_metrics = trainer.test(
+            model=routine,
+            datamodule=datamodule,
+            ckpt_path=ckpt_path,
+        )[0]
+        results["clean"] = add_ood_source_metrics(
+            clean_metrics, routine, datamodule
+        )
+        save_prediction_artifacts(
+            trainer, routine, f"{artifact_prefix}clean", datamodule
+        )
+
+        if shift_requested:
+            config = "operating_shift"
             print(f"\n=== {config} ===")
-            datamodule.test = datamodule.get_noisy_test_set(noise_type, severity)
-            if datamodule.eval_ood:
-                datamodule.ood = datamodule.get_noisy_ood_set(noise_type, severity)
-            datamodule._noisy_mode = True
+            original_test = datamodule.test
+            datamodule_ood_state = bool(getattr(datamodule, "eval_ood", False))
+            routine_ood_state = bool(getattr(routine, "eval_ood", False))
+            noisy_mode_state = bool(getattr(datamodule, "_noisy_mode", False))
             try:
+                datamodule.test = operating_shift_set
+                datamodule.eval_ood = False
+                routine.eval_ood = False
+                datamodule._noisy_mode = True
                 if on_config:
                     on_config(config)
-                noisy_metrics = trainer.test(
+                shift_metrics = trainer.test(
                     model=routine,
                     datamodule=datamodule,
                 )[0]
-                results[config] = add_ood_source_metrics(
-                    noisy_metrics, routine, datamodule
-                )
+                results[config] = shift_metrics
                 save_prediction_artifacts(
-                    trainer, routine, f"{artifact_prefix}{config}", datamodule
+                    trainer,
+                    routine,
+                    f"{artifact_prefix}{config}",
+                    datamodule,
                 )
             finally:
-                datamodule._noisy_mode = False
-    return results
+                datamodule.test = original_test
+                datamodule.eval_ood = datamodule_ood_state
+                routine.eval_ood = routine_ood_state
+                datamodule._noisy_mode = noisy_mode_state
 
+        if not getattr(args, "eval_noise", False):
+            return results
 
+        required = ("noise_params", "get_noisy_test_set", "get_noisy_ood_set")
+        missing = [name for name in required if not hasattr(datamodule, name)]
+        if missing:
+            raise NotImplementedError(
+                f"{type(datamodule).__name__} does not support noise evaluation "
+                f"({', '.join(missing)} missing). Run with --no-eval-noise."
+            )
+
+        for noise_type in datamodule.noise_params:
+            for severity in range(1, 6):
+                config = f"{noise_type}_s{severity}"
+                print(f"\n=== {config} ===")
+                datamodule.test = datamodule.get_noisy_test_set(
+                    noise_type, severity
+                )
+                if datamodule.eval_ood:
+                    datamodule.ood = datamodule.get_noisy_ood_set(
+                        noise_type, severity
+                    )
+                datamodule._noisy_mode = True
+                try:
+                    if on_config:
+                        on_config(config)
+                    noisy_metrics = trainer.test(
+                        model=routine,
+                        datamodule=datamodule,
+                    )[0]
+                    results[config] = add_ood_source_metrics(
+                        noisy_metrics, routine, datamodule
+                    )
+                    save_prediction_artifacts(
+                        trainer,
+                        routine,
+                        f"{artifact_prefix}{config}",
+                        datamodule,
+                    )
+                finally:
+                    datamodule._noisy_mode = False
+        return results
+    finally:
+        datamodule.eval_shift = datamodule_shift_state
+        routine.eval_shift = routine_shift_state
 def fit_and_evaluate(
     args,
     run_dir: Path,
@@ -377,7 +443,7 @@ def fit_and_evaluate(
     datamodule = get_datamodule(
         args,
         val_split=args.val_split,
-        eval_ood=True,
+        eval_ood=True, eval_shift=args.eval_shift,
     )
     routine = build_routine(datamodule)
     trainer = make_trainer(

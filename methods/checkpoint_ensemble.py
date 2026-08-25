@@ -29,7 +29,7 @@ def run_once(args, seed, run_dir):
             model=model, num_classes=dm.num_classes, is_ensemble=True,
             loss=nn.CrossEntropyLoss(),
             optim_recipe=optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3),
-            eval_ood=True, ood_criterion=MutualInformationCriterion(),
+            eval_ood=True, eval_shift=args.eval_shift, ood_criterion=MutualInformationCriterion(),
         )
     return fit_and_evaluate(args, run_dir, build)
 

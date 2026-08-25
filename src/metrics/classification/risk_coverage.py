@@ -60,17 +60,16 @@ class AURC(Metric):
         self.add_state("scores", default=[], dist_reduce_fx="cat")
         self.add_state("errors", default=[], dist_reduce_fx="cat")
 
-    def update(self, probs: Tensor, targets: Tensor) -> None:
-        """Store the scores and their associated errors for later computation.
-
-        Args:
-            probs (Tensor): The predicted probabilities of shape :math:`(N, C)`.
-            targets (Tensor): The ground truth labels of shape :math:`(N,)`.
-        """
-        if probs.ndim == 1:
-            probs = torch.stack([1 - probs, probs], dim=-1)
-        self.scores.append(probs.max(-1).values)
-        self.errors.append((probs.argmax(-1) != targets) * 1.0)
+    def update(
+        self,
+        probs: Tensor,
+        targets: Tensor,
+        uncertainty_scores: Tensor | None = None,
+    ) -> None:
+        """Store predictions, errors, and optional native uncertainty scores."""
+        scores, errors = _prepare_selective_inputs(probs, targets, uncertainty_scores)
+        self.scores.append(scores)
+        self.errors.append(errors)
 
     def partial_compute(self) -> Tensor:
         """Compute the error and optimal error rates for the RC curve.
@@ -115,6 +114,29 @@ def _aurc_rejection_rate_compute(
     return errors.cumsum(dim=-1) / torch.arange(
         1, scores.size(0) + 1, dtype=scores.dtype, device=scores.device
     )
+
+
+
+def _prepare_selective_inputs(
+    probs: Tensor,
+    targets: Tensor,
+    uncertainty_scores: Tensor | None,
+) -> tuple[Tensor, Tensor]:
+    """Prepare confidence-ranked errors from native uncertainty scores."""
+    if probs.ndim == 1:
+        probs = torch.stack([1 - probs, probs], dim=-1)
+    errors = (probs.argmax(-1) != targets).float()
+    if uncertainty_scores is None:
+        confidence_scores = probs.max(-1).values
+    else:
+        uncertainty_scores = uncertainty_scores.reshape(-1)
+        if uncertainty_scores.numel() != errors.numel():
+            raise ValueError(
+                "Expected one uncertainty score per prediction, but got "
+                f"{uncertainty_scores.numel()} scores for {errors.numel()} predictions."
+            )
+        confidence_scores = -uncertainty_scores
+    return confidence_scores, errors
 
 
 class AUGRC(AURC):
@@ -175,10 +197,8 @@ class CovAtxRisk(Metric):
         r"""Provide coverage at x Risk.
 
         If there are multiple coverage values corresponding to the given risk,
-        i.e., the risk(coverage) is not monotonic, the coverage at x risk is
-        the maximum coverage value corresponding to the given risk. If no
-        there is no coverage value corresponding to the given risk, return
-        float("nan").
+        i.e., the risk(coverage) is not monotonic, the largest admissible
+        coverage is returned. If no prediction is admissible, zero is returned.
 
         Args:
             risk_threshold (float): The risk threshold at which to compute the coverage.
@@ -217,17 +237,16 @@ class CovAtxRisk(Metric):
         _risk_coverage_checks(risk_threshold)
         self.risk_threshold = risk_threshold
 
-    def update(self, probs: Tensor, targets: Tensor) -> None:
-        """Store the scores and their associated errors for later computation.
-
-        Args:
-            probs (Tensor): The predicted probabilities of shape :math:`(N, C)`.
-            targets (Tensor): The ground truth labels of shape :math:`(N,)`.
-        """
-        if probs.ndim == 1:
-            probs = torch.stack([1 - probs, probs], dim=-1)
-        self.scores.append(probs.max(-1).values)
-        self.errors.append((probs.argmax(-1) != targets) * 1.0)
+    def update(
+        self,
+        probs: Tensor,
+        targets: Tensor,
+        uncertainty_scores: Tensor | None = None,
+    ) -> None:
+        """Store predictions, errors, and optional native uncertainty scores."""
+        scores, errors = _prepare_selective_inputs(probs, targets, uncertainty_scores)
+        self.scores.append(scores)
+        self.errors.append(errors)
 
     def compute(self) -> Tensor:
         """Compute the coverage at x Risk.
@@ -241,14 +260,14 @@ class CovAtxRisk(Metric):
         if num_samples < 1:
             return torch.tensor([float("nan")], device=self.device)
         error_rates = _aurc_rejection_rate_compute(scores, errors)
-        admissible_risks = (error_rates > self.risk_threshold) * 1
-        max_cov_at_risk = admissible_risks.flip(0).argmin()
-
-        # check if max_cov_at_risk is really admissible, if not return nan
-        risk = admissible_risks[max_cov_at_risk]
-        if risk > self.risk_threshold:
-            return torch.tensor([float("nan")], device=self.device)
-        return 1 - max_cov_at_risk / num_samples
+        admissible = torch.nonzero(
+            error_rates <= self.risk_threshold,
+            as_tuple=False,
+        ).flatten()
+        if admissible.numel() == 0:
+            return scores.new_tensor(0.0)
+        # Indices are zero-based, whereas coverage starts at one retained sample.
+        return (admissible[-1] + 1).to(scores.dtype) / num_samples
 
 
 class CovAt5Risk(CovAtxRisk):
@@ -257,8 +276,8 @@ class CovAt5Risk(CovAtxRisk):
 
         If there are multiple coverage values corresponding to 5% risk, the
         coverage at 5% risk is the maximum coverage value corresponding to 5%
-        risk. If no there is no coverage value corresponding to the given risk,
-        this metric returns float("nan").
+        risk. If no prediction can satisfy the risk threshold, the admissible
+        coverage is zero.
 
         This is a specific case of the more general CovAtxRisk metric, where the risk level is fixed at 5%.
 
@@ -331,17 +350,16 @@ class RiskAtxCov(Metric):
         _risk_coverage_checks(cov_threshold)
         self.cov_threshold = cov_threshold
 
-    def update(self, probs: Tensor, targets: Tensor) -> None:
-        """Store the scores and their associated errors for later computation.
-
-        Args:
-            probs (Tensor): The predicted probabilities of shape :math:`(N, C)`.
-            targets (Tensor): The ground truth labels of shape :math:`(N,)`.
-        """
-        if probs.ndim == 1:
-            probs = torch.stack([1 - probs, probs], dim=-1)
-        self.scores.append(probs.max(-1).values)
-        self.errors.append((probs.argmax(-1) != targets) * 1.0)
+    def update(
+        self,
+        probs: Tensor,
+        targets: Tensor,
+        uncertainty_scores: Tensor | None = None,
+    ) -> None:
+        """Store predictions, errors, and optional native uncertainty scores."""
+        scores, errors = _prepare_selective_inputs(probs, targets, uncertainty_scores)
+        self.scores.append(scores)
+        self.errors.append(errors)
 
     def compute(self) -> Tensor:
         """Compute the risk at given coverage.

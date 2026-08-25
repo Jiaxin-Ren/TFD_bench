@@ -66,6 +66,10 @@ METHOD_NAMES = {
     "mc_dropout":          "MC Dropout",
     "mc_batch_norm":       "MC BatchNorm",
 }
+CONFIG_NAMES = {
+    "clean": "Clean",
+    "operating_shift": "Operating shift",
+}
 
 
 def load_results(path: str) -> Dict[str, Any]:
@@ -103,13 +107,15 @@ def _best(results, metrics):
 
 
 def _config_sort_key(config: str):
-    """Keep clean first and sort noise severities numerically."""
+    """Keep clean and operating shift first, then sort noise severities."""
     if config == "clean":
         return (0, "", 0)
+    if config == "operating_shift":
+        return (1, "", 0)
     match = re.fullmatch(r"(.+)_s(\d+)", config)
     if match:
-        return (1, match.group(1), int(match.group(2)))
-    return (2, config, 0)
+        return (2, match.group(1), int(match.group(2)))
+    return (3, config, 0)
 
 
 def _group_results(results):
@@ -130,7 +136,7 @@ def _group_results(results):
 
 def _group_title(group_key):
     dataset, backbone, config = group_key
-    return f"{dataset} / {backbone} / {config}"
+    return f"{dataset} / {backbone} / {CONFIG_NAMES.get(config, config)}"
 
 
 def generate_markdown_table(results, metrics, highlight_best=True) -> str:

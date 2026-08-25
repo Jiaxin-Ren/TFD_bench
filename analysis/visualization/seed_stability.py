@@ -82,7 +82,7 @@ def generate_seed_stability_plot(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", default=str(_PROJECT_ROOT / "results"))
-    parser.add_argument("--dataset", default="mgb")
+    parser.add_argument("--dataset", default="seu")
     parser.add_argument("--backbone", default="resnet")
     parser.add_argument("--config", default="clean")
     parser.add_argument("--methods", nargs="+")

@@ -25,7 +25,7 @@ METHOD_NAME = "sgld"
 
 
 def run_once(args, seed, run_dir):
-    dm = get_datamodule(args, val_split=args.val_split, eval_ood=True)
+    dm = get_datamodule(args, val_split=args.val_split, eval_ood=True, eval_shift=args.eval_shift)
     base = get_model(args.backbone, dm.num_channels, dm.num_classes)
     pretrain = ClassificationRoutine(
         model=base, num_classes=dm.num_classes, loss=nn.CrossEntropyLoss(),
@@ -44,7 +44,7 @@ def run_once(args, seed, run_dir):
         loss=nn.CrossEntropyLoss(),
         optim_recipe=SGLD(model.parameters(), lr=args.lr, noise_factor=args.noise_factor,
                           weight_decay=1e-3),
-        eval_ood=True, ood_criterion=MutualInformationCriterion(),
+        eval_ood=True, eval_shift=args.eval_shift, ood_criterion=MutualInformationCriterion(),
     )
     trainer = make_trainer(args, run_dir, checkpoint=False)
     trainer.fit(routine, datamodule=dm)

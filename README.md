@@ -410,6 +410,11 @@ python analysis/visualization/plot_all.py --exclude-methods swag sgld sghmc
 
 对比图中的点为多个随机种子的均值，误差线为样本标准差。不同噪声类型分别成图，
 不会把 Gaussian、Impulse 等不同噪声首尾连接。需要先清理之前生成的图片时使用：
+选择性分类同时记录 AURC、AUGRC、Cov@5%Risk 和 Risk@80%Cov。
+`plot_all.py` 会为 clean、operating shift 和每个噪声配置生成
+`<config>_selective.png`，并基于各方法的原生不确定性生成对应的风险—覆盖图；
+噪声严重度趋势另存为 `noise_<type>_selective.png`。
+
 
 ```bash
 python analysis/visualization/plot_all.py --clean
@@ -420,15 +425,15 @@ python analysis/visualization/plot_all.py --clean
 
 ```bash
 # 只依赖 results/summary.json；旧实验结果也可以直接画
-python analysis/visualization/comparison.py --dataset mgb --backbone resnet
-python analysis/visualization/noise_robustness.py --dataset mgb --backbone resnet
+python analysis/visualization/comparison.py --dataset seu --backbone resnet
+python analysis/visualization/noise_robustness.py --dataset seu --backbone resnet
 
 # 依赖 seed*/predictions/*.npz
-python analysis/visualization/reliability.py --dataset mgb --backbone resnet
-python analysis/visualization/roc.py --dataset mgb --backbone resnet
-python analysis/visualization/uncertainty.py --dataset mgb --backbone resnet
-python analysis/visualization/risk_coverage.py --dataset mgb --backbone resnet
-python analysis/visualization/seed_stability.py --dataset mgb --backbone resnet
+python analysis/visualization/reliability.py --dataset seu --backbone resnet
+python analysis/visualization/roc.py --dataset seu --backbone resnet
+python analysis/visualization/uncertainty.py --dataset seu --backbone resnet
+python analysis/visualization/risk_coverage.py --dataset seu --backbone resnet
+python analysis/visualization/seed_stability.py --dataset seu --backbone resnet
 ```
 
 所有独立命令都支持 `--methods edl max_softmax`、`--config clean`、`--output`（噪声图使用
