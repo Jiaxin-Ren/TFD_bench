@@ -76,6 +76,9 @@ def build_commands(config_path: Path, config: dict[str, Any]) -> list[list[str]]
                     "--data-root", str(dataset["root"]),
                     "--backbone", str(backbone),
                 ]
+                for key, value in dataset.items():
+                    if key not in {"name", "root"}:
+                        append_option(command, key, value)
                 for key, value in overrides.items():
                     append_option(command, key, value)
                 commands.append(command)

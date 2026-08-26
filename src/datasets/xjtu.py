@@ -29,6 +29,14 @@ Fault Types / 故障类型:
     - 1ndBearing_*: 轴承故障 (ball, inner, outer, mix)
     - 2ndPlanetary_*: 行星齿轮故障 (brokentooth, missingtooth, normalstate, rootcracks, toothwear)
 """
+import hashlib
+import sys, warnings
+
+warnings.filterwarnings('ignore')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
 
 from itertools import islice
 import numpy as np
@@ -37,14 +45,27 @@ from pathlib import Path
 from torch import nn
 from torch.utils.data import DataLoader
 from src.datasets.datamodule import TUDataModule
+from src.datasets.cache import load_cached_array
 from src.datasets.base_dataset import dataset
 from src.datasets.noise import NoisyEvaluationMixin
 from src.datasets.transforms import build_transforms
-from src.datasets.utils import create_train_val_split
+from src.datasets.utils import (
+    assert_disjoint_temporal_splits,
+    concatenate_temporal_splits,
+    temporal_window_split,
+    subsample_uniform,
+    random_pool_test_split,
+    stratified_split,
+)
 from typing import Literal, List, Optional
 
 signal_size = 1024
 
+TEST_RATIO = 0.2
+SPLIT_GAP_WINDOWS = 1
+MAX_ID_WINDOWS_PER_FILE = 500
+MAX_OOD_WINDOWS_PER_FILE = 800
+MAX_SHIFT_WINDOWS_PER_FILE = 500
 # =============================================================================
 # Class Definitions / 类别定义
 # =============================================================================
@@ -71,6 +92,10 @@ NUM_ID_CLASSES = len(ID_CLASSES)
 # 因为mix类型是复合故障，更难识别
 OOD_CLASSES = ["1ndBearing_mix(inner+outer+ball)"]
 OOD_LABEL = -1
+# XJTU only ships one OOD fault class, so there is no near/far grouping to
+# make: "near"/"far"/"all" all resolve to the same class list.
+OOD_CLASSES_NEAR = OOD_CLASSES
+OOD_CLASSES_FAR = OOD_CLASSES
 
 # ID类别(排除OOD)
 ID_CLASSES_NO_OOD = [c for c in ID_CLASSES if c not in OOD_CLASSES]
@@ -84,7 +109,7 @@ CHANNEL_SHIFT = "Data_Chan2.txt"   # Shift数据使用通道2
 HEADER_LINES = 14
 
 
-def load_signal_txt(filepath: str) -> np.ndarray:
+def _read_signal_txt(filepath: str) -> np.ndarray:
     """
     Load vibration signal from XJTU txt file.
     从XJTU txt文件加载振动信号。
@@ -102,6 +127,16 @@ def load_signal_txt(filepath: str) -> np.ndarray:
     
     return np.array(data).reshape(-1, 1)
 
+def load_signal_txt(filepath: str) -> np.ndarray:
+    """Load the parsed text signal through the shared disk cache."""
+    return load_cached_array(
+        filepath,
+        "xjtu",
+        lambda source: _read_signal_txt(str(source)),
+        parameters={"format": "text", "skip_rows": HEADER_LINES},
+    )
+
+
 
 def slice_windows(arr: np.ndarray, label: int, win: int = signal_size):
     """Slice signal into fixed-length windows / 将信号切分为固定长度窗口"""
@@ -118,17 +153,23 @@ def slice_windows(arr: np.ndarray, label: int, win: int = signal_size):
     return data, labels
 
 
-def data_load(filepath: str, label: int):
+def data_load(
+    filepath: str,
+    label: int,
+    max_windows: int | None = None,
+):
     """Load and slice data from a txt file / 从txt文件加载并切分数据"""
     arr = load_signal_txt(filepath)
-    return slice_windows(arr, label, win=signal_size)
+    data, labels = slice_windows(arr, label, win=signal_size)
+    return subsample_uniform(data, labels, max_windows)
 
 
 def build_df_from_classes(
     root: Path, 
     classes: List[str], 
     label_dict: dict,
-    channel: str = CHANNEL_ID
+    channel: str = CHANNEL_ID,
+    max_windows_per_file: int | None = None,
 ) -> pd.DataFrame:
     """
     Build DataFrame from class folders.
@@ -146,7 +187,9 @@ def build_df_from_classes(
         label = label_dict.get(cls, 0)
         
         try:
-            d, l = data_load(str(filepath), label)
+            d, l = data_load(
+                str(filepath), label, max_windows=max_windows_per_file
+            )
             all_data += d
             all_labels += l
             all_sources += [cls] * len(d)
@@ -158,6 +201,34 @@ def build_df_from_classes(
         "label": all_labels,
         "source": all_sources,
     })
+
+
+def build_temporal_id_splits(
+    root: Path,
+    val_ratio: float,
+    max_windows_per_file: int | None = MAX_ID_WINDOWS_PER_FILE,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split every XJTU ID recording chronologically before concatenation."""
+    splits = []
+    for fault_class in ID_CLASSES_NO_OOD:
+        filepath = root / fault_class / CHANNEL_ID
+        if not filepath.exists():
+            raise FileNotFoundError(
+                f"Required XJTU ID file not found: {filepath}"
+            )
+        label = ID_LABELS_NO_OOD[fault_class]
+        data, labels = data_load(
+            str(filepath), label, max_windows=max_windows_per_file
+        )
+        splits.append(
+            temporal_window_split(
+                data, labels, f"{fault_class}/{CHANNEL_ID}", val_ratio,
+                TEST_RATIO, SPLIT_GAP_WINDOWS,
+            )
+        )
+    result = concatenate_temporal_splits(splits)
+    assert_disjoint_temporal_splits(*result)
+    return result
 
 
 class XJTUDataModule(NoisyEvaluationMixin, TUDataModule):
@@ -190,12 +261,17 @@ class XJTUDataModule(NoisyEvaluationMixin, TUDataModule):
             train_transform: nn.Module | None = None,
             test_transform: nn.Module | None = None,
             ood_transform: nn.Module | None = None,
-            normlize_type: str = "-1-1",
+            normalize_type: str = "-1-1",
             pin_memory: bool = True,
             persistent_workers: bool = True,
             eval_noise: bool = False,
             noise_configs: list[tuple[str, int]] | None = None,
             split_seed: int = 12345,
+            max_id_windows_per_file: int | None = MAX_ID_WINDOWS_PER_FILE,
+            max_ood_windows_per_file: int | None = MAX_OOD_WINDOWS_PER_FILE,
+            max_shift_windows_per_file: int | None = MAX_SHIFT_WINDOWS_PER_FILE,
+            split_mode: Literal["random", "temporal"] = "temporal",
+            ood_subset: Literal["all", "near", "far"] = "all",
     ) -> None:
 
         super().__init__(
@@ -219,54 +295,102 @@ class XJTUDataModule(NoisyEvaluationMixin, TUDataModule):
             for severity in range(1, 6)
         ]
         self.split_seed = split_seed
-        self.normlize_type = normlize_type
+        self.normalize_type = normalize_type
 
-        self.train_transform = build_transforms("train", normalize=self.normlize_type)
-        self.val_transform = build_transforms("val", normalize=self.normlize_type)
-        self.test_transform = build_transforms("val", normalize=self.normlize_type)
-        self.ood_transform = build_transforms("val", normalize=self.normlize_type)
+        self.train_transform = build_transforms("train", normalize=self.normalize_type)
+        self._split_done = False
+        self.val_transform = build_transforms("val", normalize=self.normalize_type)
+        self.max_id_windows_per_file = max_id_windows_per_file
+        self.max_ood_windows_per_file = max_ood_windows_per_file
+        self.max_shift_windows_per_file = max_shift_windows_per_file
+        self.split_mode = split_mode
+        self.ood_subset = ood_subset
+        self.test_transform = build_transforms("val", normalize=self.normalize_type)
+        self.ood_transform = build_transforms("val", normalize=self.normalize_type)
+
+    def _ood_class_list(self) -> list:
+        if self.ood_subset == "near":
+            return OOD_CLASSES_NEAR
+        if self.ood_subset == "far":
+            return OOD_CLASSES_FAR
+        return OOD_CLASSES
+
+    def _build_splits(self) -> None:
+        if self._split_done:
+            return
+        if not self.val_split:
+            raise ValueError(
+                "val_split must be positive to keep validation and test sets separate."
+            )
+        root = Path(self.root)
+        if self.split_mode == "temporal":
+            self.train_df, self.val_df, self.test_df = build_temporal_id_splits(
+                root, self.val_split, self.max_id_windows_per_file
+            )
+        else:
+            id_df = build_df_from_classes(
+                root, ID_CLASSES_NO_OOD, ID_LABELS_NO_OOD, CHANNEL_ID,
+                self.max_id_windows_per_file,
+            )
+            # Test cut uses a fixed shuffle seed, independent of the model seed.
+            pool_df, self.test_df = random_pool_test_split(id_df, TEST_RATIO)
+            self.train_df, self.val_df = stratified_split(
+                pool_df, self.val_split, self.split_seed
+            )
+        if self.eval_ood:
+            classes = self._ood_class_list()
+            ood_labels = {cls: OOD_LABEL for cls in classes}
+            self.ood_df = build_df_from_classes(
+                root, classes, ood_labels, CHANNEL_ID,
+                self.max_ood_windows_per_file,
+            )
+        if self.eval_shift:
+            self.shift_df = build_df_from_classes(
+                root, ID_CLASSES_NO_OOD, ID_LABELS_NO_OOD, CHANNEL_SHIFT,
+                self.max_shift_windows_per_file,
+            )
+        self._split_done = True
 
     def setup(self, stage: Literal["fit", "test"] | None = None) -> None:
         if getattr(self, "_noisy_mode", False):
             return
-        if not self.val_split:
-            raise ValueError("val_split must be positive to keep validation and test sets separate.")
-        root = Path(self.root)
-        
-        # Build ID data (Channel 1, excluding OOD classes)
-        id_df = build_df_from_classes(root, ID_CLASSES_NO_OOD, ID_LABELS_NO_OOD, CHANNEL_ID)
-        id_df = id_df.sample(frac=1, random_state=42).reset_index(drop=True)
-        
-        # Train/test split
-        test_ratio = 0.2
-        test_size = int(len(id_df) * test_ratio)
-        self.test_df = id_df.iloc[:test_size].reset_index(drop=True)
-        train_df = id_df.iloc[test_size:].reset_index(drop=True)
-
-        if stage in ("fit", None):
-            full = dataset(list_data=train_df, transform=self.train_transform)
-            if self.val_split:
-                self.train, self.val = create_train_val_split(
-                    full, self.val_split,
-                    self.test_transform, self.split_seed)
+        self._build_splits()
+        self.train = dataset(
+            list_data=self.train_df, transform=self.train_transform
+        )
+        self.val = dataset(
+            list_data=self.val_df, transform=self.test_transform
+        )
         if stage in ("test", None):
-            full = dataset(list_data=train_df, transform=self.train_transform)
-            if self.val_split:
-                self.train, self.val = create_train_val_split(
-                    full, self.val_split,
-                    self.test_transform, self.split_seed)
-            self.test = dataset(list_data=self.test_df, transform=self.test_transform)
-
-        # OOD data: Mix fault (compound fault - never seen in training)
+            self.test = dataset(
+                list_data=self.test_df, transform=self.test_transform
+            )
         if self.eval_ood:
-            ood_labels = {cls: OOD_LABEL for cls in OOD_CLASSES}
-            self.ood_df = build_df_from_classes(root, OOD_CLASSES, ood_labels, CHANNEL_ID)
-            self.ood = dataset(list_data=self.ood_df, transform=self.ood_transform)
-
-        # Shift data: Same classes using Channel 2 (different sensor)
+            self.ood = dataset(
+                list_data=self.ood_df, transform=self.ood_transform
+            )
         if self.eval_shift:
-            shift_df = build_df_from_classes(root, ID_CLASSES_NO_OOD, ID_LABELS_NO_OOD, CHANNEL_SHIFT)
-            self.shift = dataset(list_data=shift_df, transform=self.test_transform)
+            self.shift = dataset(
+                list_data=self.shift_df, transform=self.test_transform
+            )
+
+    
+    def split_summary(self) -> str:
+        """打印各划分的样本数与每类分布，用于确认划分不随 seed 变化。"""
+        self._build_splits()
+        lines = [f"split_mode={self.split_mode}"]
+        for name, df in [("train", self.train_df), ("val", self.val_df),
+                         ("test", self.test_df)]:
+            counts = df["label"].value_counts().sort_index().to_dict()
+            lines.append(f"{name:6s} n={len(df):5d}  per-class={counts}")
+        if self.eval_ood:
+            lines.append(f"{'ood':6s} n={len(self.ood_df):5d}  "
+                         f"subset={self.ood_subset}  "
+                         f"max_per_file={self.max_ood_windows_per_file}")
+        if self.eval_shift:
+            lines.append(f"{'shift':6s} n={len(self.shift_df):5d}")
+        return "\n".join(lines)
+
 
     def test_dataloader(self) -> list[DataLoader]:
         dataloaders = [
@@ -283,66 +407,26 @@ class XJTUDataModule(NoisyEvaluationMixin, TUDataModule):
         return dataloaders
 
 
-# =============================================================================
-# Utility functions / 工具函数
-# =============================================================================
-
-def print_dataset_info(root: str | Path):
-    """Print dataset information / 打印数据集信息"""
-    root = Path(root)
-    
-    print("=" * 60)
-    print("XJTU Gearbox Dataset Info / XJTU齿轮箱数据集信息")
-    print("=" * 60)
-    
-    print(f"\nID Classes ({len(ID_CLASSES_NO_OOD)} total):")
-    for cls in ID_CLASSES_NO_OOD:
-        chan1 = root / cls / CHANNEL_ID
-        chan2 = root / cls / CHANNEL_SHIFT
-        status1 = "✓" if chan1.exists() else "✗"
-        status2 = "✓" if chan2.exists() else "✗"
-        print(f"  {cls}: Chan1={status1}, Chan2={status2}")
-    
-    print(f"\nOOD Classes ({len(OOD_CLASSES)} total):")
-    for cls in OOD_CLASSES:
-        chan1 = root / cls / CHANNEL_ID
-        status = "✓" if chan1.exists() else "✗"
-        print(f"  {cls}: {status}")
-    
-    print("\n" + "-" * 40)
-    print("Bearing Faults (轴承故障):")
-    bearing = [c for c in ALL_CLASSES if c.startswith("1nd")]
-    for c in bearing:
-        print(f"  - {c}")
-    
-    print("\nPlanetary Gear Faults (行星齿轮故障):")
-    planetary = [c for c in ALL_CLASSES if c.startswith("2nd")]
-    for c in planetary:
-        print(f"  - {c}")
-    
-    print("=" * 60)
-
-
 if __name__ == "__main__":
-    import sys
-    
-    # Default path or command line argument
-    if len(sys.argv) > 1:
-        data_root = sys.argv[1]
-    else:
-        data_root = r".\data\xjtu"
-    
-    print_dataset_info(data_root)
-    
-    # Test loading
-    print("\nTesting DataModule...")
-    dm = XJTUDataModule(root=data_root, batch_size=32, eval_ood=True, eval_shift=True)
-    dm.setup()
-    
-    print(f"Train samples: {len(dm.train)}")
-    print(f"Val samples: {len(dm.val)}")
-    print(f"Test samples: {len(dm.test)}")
-    if dm.eval_ood:
-        print(f"OOD samples: {len(dm.ood)}")
-    if dm.eval_shift:
-        print(f"Shift samples: {len(dm.shift)}")
+    import torch
+
+    for mode in ["random", "temporal"]:
+        print(f"\n{'=' * 60}\n  split_mode = {mode}\n{'=' * 60}")
+        fingerprints = []
+        for s in [0, 1, 2]:
+            torch.manual_seed(s)
+            np.random.seed(s)
+            dm = XJTUDataModule(root="/mnt/d/Data/Machine/XJTU", batch_size=64,
+                               val_split=0.2, eval_ood=True, split_mode=mode)
+            dm.setup("test")
+            print(f"\n--- global seed {s} ---")
+            print(dm.split_summary())
+            fp = hashlib.md5(
+                str(dm.val_df["label"].tolist()
+                    + [float(a.sum()) for a in dm.val_df["data"]]).encode()
+            ).hexdigest()[:12]
+            fingerprints.append(fp)
+            print("val fingerprint:", fp)
+
+        print("\n划分是否稳定:",
+              "是" if len(set(fingerprints)) == 1 else "否 —— 仍受全局随机状态影响")

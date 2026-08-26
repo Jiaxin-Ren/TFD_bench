@@ -11,6 +11,10 @@ Available modules / 可用模块:
 - noise_robustness: Separate noise severity curves / 噪声鲁棒性曲线
 - seed_stability: Per-seed metric dispersion / 随机种子稳定性
 """
+from .style import apply_publication_style
+
+apply_publication_style()
+
 
 from . import reliability
 from . import uncertainty

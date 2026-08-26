@@ -40,6 +40,30 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("--reg-weight", commands[1])
         self.assertEqual(commands[1][commands[1].index("--reg-weight") + 1], "0.01")
 
+    def test_forwards_dataset_specific_window_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {
+                "methods": ["max_softmax"],
+                "backbones": ["resnet"],
+                "datasets": [{
+                    "name": "wt",
+                    "root": "./data/WT",
+                    "max_id_windows_per_file": 500,
+                    "max_ood_windows_per_file": 100,
+                    "max_shift_windows_per_file": 100,
+                }],
+            }
+            path = self.write_config(root, config)
+            command = benchmark_run.build_commands(path, config)[0]
+
+        for option, expected in (
+            ("--max-id-windows-per-file", "500"),
+            ("--max-ood-windows-per-file", "100"),
+            ("--max-shift-windows-per-file", "100"),
+        ):
+            self.assertEqual(command[command.index(option) + 1], expected)
+
     def test_rejects_incomplete_dataset(self) -> None:
         config = {
             "methods": ["max_softmax"],

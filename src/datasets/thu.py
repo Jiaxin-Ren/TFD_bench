@@ -26,8 +26,14 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from src.datasets.datamodule import TUDataModule
+from src.datasets.cache import load_cached_array
 
 from src.datasets.base_dataset import dataset
+from src.datasets.utils import (
+    assert_disjoint_sources,
+    random_pool_test_split,
+    stratified_split,
+)
 from src.datasets.noise import NoisyEvaluationMixin
 from src.datasets.transforms import build_transforms
 
@@ -61,6 +67,13 @@ OOD_PREFIXES = [
 OOD_LABEL = -1
 OOD_LABELS = [OOD_LABEL] * len(OOD_PREFIXES)
 
+# OOD 按故障部位拆成两档，用于在集合过大时缩减评估样本数：
+#   near —— 复合内圈轴承故障
+#   far  —— 复合外圈轴承故障
+# 两者是不同故障部位而非严重度分层，划分依据类别而非难度。
+OOD_PREFIXES_NEAR = ["teeth_break_and_bearing_inner_H_"]
+OOD_PREFIXES_FAR = ["teeth_break_and_bearing_outer_H_"]
+
 # ──────────────────────────────────────────────────────────────
 # 显式文件名分配（按文件级隔离，避免同一文件同时出现在多个 split）
 # ──────────────────────────────────────────────────────────────
@@ -84,15 +97,17 @@ OOD_SUFFIXES = [
 ]
 
 
-MAX_WINDOWS_TRAIN = 800
-MAX_WINDOWS_VAL = 200
-MAX_WINDOWS_TEST = 200
-MAX_WINDOWS_OOD = 200
+# 与其余数据集统一命名：max_id_windows_per_file 统一控制 train/val/test 三个
+# ID split 的单文件窗口上限（原来分别是 800/200/200，现改为单一可配置值，
+# 默认取原 train 的量级）；max_ood_windows_per_file 控制 OOD split。
+MAX_ID_WINDOWS_PER_FILE = 800
+MAX_OOD_WINDOWS_PER_FILE = 200
+TEST_RATIO = 0.2
 
 
 
 
-def load_multichannel_csv(
+def _read_multichannel_csv(
     path: Path,
     use_channels: list[str] = USE_CHANNELS,
     torque_scale: float = TORQUE_SCALE,
@@ -102,6 +117,26 @@ def load_multichannel_csv(
     if "torque" in use_channels and "torque" in df.columns:
         df["torque"] = df["torque"] * torque_scale
     return df[use_channels].dropna().to_numpy(dtype=np.float32)
+
+def load_multichannel_csv(
+    path: Path,
+    use_channels: list[str] = USE_CHANNELS,
+    torque_scale: float = TORQUE_SCALE,
+) -> np.ndarray:
+    """Load selected channels through the shared disk cache."""
+    return load_cached_array(
+        path,
+        "thu",
+        lambda source: _read_multichannel_csv(
+            source, use_channels, torque_scale
+        ),
+        parameters={
+            "format": "csv",
+            "channels": list(use_channels),
+            "torque_scale": torque_scale,
+        },
+    )
+
 
 
 def slice_windows(
@@ -170,7 +205,7 @@ def build_df_from_files(
                 warnings.warn(f"[THUDataModule] 未读取到数据：{fname}")
             all_data += d
             all_labels += l
-            all_sources += [prefix.rstrip("_")] * len(d)
+            all_sources += [fname] * len(d)
 
     if not all_data:
         raise RuntimeError(
@@ -188,7 +223,8 @@ class THUDataModule(NoisyEvaluationMixin, TUDataModule):
 
     数据划分策略
     ─────────────
-    采用文件级隔离而非窗口级随机切分，避免同一连续信号被拆入多个 split：
+    split_mode="temporal"（默认）：采用文件级隔离而非窗口级随机切分，避免同一
+    连续信号被拆入多个 split：
         train : speed_circulation 4 个工况文件（10/20Nm × 1000/2000rpm + 20Nm-3000rpm）
         val   : torque_circulation_2000rpm_20Nm.csv（1 个文件）
         test  : torque_circulation_3000rpm_10Nm.csv（1 个文件）
@@ -198,10 +234,14 @@ class THUDataModule(NoisyEvaluationMixin, TUDataModule):
     train 使用 speed_circulation、val/test 使用 torque_circulation，
     两类扫描方式来自不同文件，天然保证 split 之间零重叠。
 
+    split_mode="random"：打散 train/val/test 的工况文件边界，将全部 ID 文件
+    池化后按类别分层随机切分（与 seu.py/mgb.py 的 random 模式一致）。
+
     样本数控制
     ──────────
-    max_windows_per_file：每个文件最多取多少窗口（均匀间隔采样，None = 不限）。
-    在 per-file 粒度限流，保证 train 的 4 个工况文件样本贡献均匀。
+    max_id_windows_per_file：ID 相关 split（train/val/test）每个文件最多取多少
+    窗口（均匀间隔采样，None = 不限）。
+    max_ood_windows_per_file：OOD split 每个文件的窗口上限。
     """
 
     num_classes = len(ID_PREFIXES)
@@ -235,8 +275,11 @@ class THUDataModule(NoisyEvaluationMixin, TUDataModule):
         test_suffixes: list[str] = TEST_SUFFIXES,
         ood_suffixes: list[str] = OOD_SUFFIXES,
         normalize_type: str = "-1-1",
-        max_windows_per_file: int | None = None,
-        seed: int = 42,
+        max_id_windows_per_file: int | None = MAX_ID_WINDOWS_PER_FILE,
+        max_ood_windows_per_file: int | None = MAX_OOD_WINDOWS_PER_FILE,
+        split_seed: int = 42,
+        split_mode: Literal["random", "temporal"] = "temporal",
+        ood_subset: Literal["all", "near", "far"] = "all",
         eval_noise: bool = False,
         noise_configs: list[tuple[str, int]] | None = None,
     ) -> None:
@@ -270,8 +313,11 @@ class THUDataModule(NoisyEvaluationMixin, TUDataModule):
         self.test_suffixes = test_suffixes
         self.ood_suffixes = ood_suffixes
         self.normalize_type = normalize_type
-        self.max_windows_per_file = max_windows_per_file
-        self.seed = seed
+        self.max_id_windows_per_file = max_id_windows_per_file
+        self.max_ood_windows_per_file = max_ood_windows_per_file
+        self.split_seed = split_seed
+        self.split_mode = split_mode
+        self.ood_subset = ood_subset
         self._split_done = False
 
         self.num_channels = len(use_channels)
@@ -295,29 +341,55 @@ class THUDataModule(NoisyEvaluationMixin, TUDataModule):
             max_windows_per_file=max_windows_per_file,
         )
 
+    def _ood_prefix_list(self) -> list[str]:
+        if self.ood_subset == "near":
+            return OOD_PREFIXES_NEAR
+        if self.ood_subset == "far":
+            return OOD_PREFIXES_FAR
+        return self.ood_prefixes
+
     def setup(self, stage: Literal["fit", "test"] | None = None) -> None:
         if getattr(self, "_noisy_mode", False):
             return
         id_labels = list(range(len(self.id_prefixes)))
         if not self._split_done:
-            self.train_df = self._build(
-                self.id_prefixes, id_labels, self.train_suffixes,
-                max_windows_per_file=MAX_WINDOWS_TRAIN,
-            )
-            self.val_df = self._build(
-                self.id_prefixes, id_labels, self.val_suffixes,
-                max_windows_per_file=MAX_WINDOWS_VAL,
-            )
-            self.test_df = self._build(
-                self.id_prefixes, id_labels, self.test_suffixes,
-                max_windows_per_file=MAX_WINDOWS_TEST,
-            )
+            if self.split_mode == "temporal":
+                self.train_df = self._build(
+                    self.id_prefixes, id_labels, self.train_suffixes,
+                    max_windows_per_file=self.max_id_windows_per_file,
+                )
+                self.val_df = self._build(
+                    self.id_prefixes, id_labels, self.val_suffixes,
+                    max_windows_per_file=self.max_id_windows_per_file,
+                )
+                self.test_df = self._build(
+                    self.id_prefixes, id_labels, self.test_suffixes,
+                    max_windows_per_file=self.max_id_windows_per_file,
+                )
+                assert_disjoint_sources(self.train_df, self.val_df, self.test_df)
+            else:
+                if not self.val_split:
+                    raise ValueError(
+                        "val_split must be positive when split_mode='random'."
+                    )
+                # 打散 train/val/test 的工况文件边界，池化后按类别随机切分。
+                all_suffixes = self.train_suffixes + self.val_suffixes + self.test_suffixes
+                id_df = self._build(
+                    self.id_prefixes, id_labels, all_suffixes,
+                    max_windows_per_file=self.max_id_windows_per_file,
+                )
+                # Test cut uses a fixed shuffle seed, independent of the model seed.
+                pool_df, self.test_df = random_pool_test_split(id_df, TEST_RATIO)
+                self.train_df, self.val_df = stratified_split(
+                    pool_df, self.val_split, self.split_seed
+                )
             if self.eval_ood:
+                ood_prefixes = self._ood_prefix_list()
                 self.ood_df = self._build(
-                    self.ood_prefixes,
-                    [OOD_LABEL] * len(self.ood_prefixes),
+                    ood_prefixes,
+                    [OOD_LABEL] * len(ood_prefixes),
                     self.ood_suffixes,
-                    max_windows_per_file=MAX_WINDOWS_OOD,
+                    max_windows_per_file=self.max_ood_windows_per_file,
                 )
             self._split_done = True
 
@@ -338,7 +410,7 @@ class THUDataModule(NoisyEvaluationMixin, TUDataModule):
         generator = None
         if training or shuffle:
             generator = torch.Generator()
-            generator.manual_seed(self.seed)
+            generator.manual_seed(self.split_seed)
 
         return DataLoader(
             ds,
@@ -357,3 +429,6 @@ class THUDataModule(NoisyEvaluationMixin, TUDataModule):
                 self._data_loader(self.get_ood_set(), training=False, shuffle=False)
             )
         return loaders
+
+
+

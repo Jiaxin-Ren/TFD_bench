@@ -22,6 +22,14 @@ Classes / 类别:
     OOD (Outer Race faults): OR007, OR014, OR021
     Shift: Same classes but different load (3HP instead of 0HP)
 """
+import hashlib
+import sys, warnings
+
+warnings.filterwarnings('ignore')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
 
 from itertools import islice
 import numpy as np
@@ -34,7 +42,14 @@ from src.datasets.datamodule import TUDataModule
 from src.datasets.base_dataset import dataset
 from src.datasets.noise import NoisyEvaluationMixin
 from src.datasets.transforms import build_transforms
-from src.datasets.utils import create_train_val_split
+from src.datasets.utils import (
+    assert_disjoint_temporal_splits,
+    concatenate_temporal_splits,
+    temporal_window_split,
+    subsample_uniform,
+    random_pool_test_split,
+    stratified_split,
+)
 from typing import Literal
 import scipy.io as sio
 
@@ -43,6 +58,7 @@ signal_size = 1024
 
 # =============================================================================
 # File Number to Fault Type Mapping (12kHz Drive End)
+from src.datasets.cache import load_cached_array
 # 文件编号与故障类型对应关系 (12kHz 驱动端)
 # =============================================================================
 
@@ -118,9 +134,17 @@ OOD_CLASSES = ["OR007", "OR014", "OR021"]
 OOD_LABEL = -1
 OOD_LABELS = {cls: OOD_LABEL for cls in OOD_CLASSES}
 
+# OOD 按故障尺寸(defect diameter)拆成两档：
+#   near —— 0.007" 小尺寸故障，幅值与 ID 中最小尺寸故障(IR007/B007)接近
+#   far  —— 0.014"/0.021" 较大尺寸故障，特征更明显、更容易与 ID 区分
+OOD_CLASSES_NEAR = ["OR007"]
+OOD_CLASSES_FAR = ["OR014", "OR021"]
+
 # 根据负载划分
 ID_LOAD = 0    # ID数据使用0HP负载
 SHIFT_LOAD = 3  # Shift数据使用3HP负载
+TEST_RATIO = 0.2
+SPLIT_GAP_WINDOWS = 1
 
 
 def get_files_for_condition(load_hp: int, classes: list) -> list:
@@ -140,7 +164,12 @@ SHIFT_FILES = get_files_for_condition(SHIFT_LOAD, ID_CLASSES)
 OOD_FILES = get_files_for_condition(0, OOD_CLASSES) + get_files_for_condition(3, OOD_CLASSES)
 
 
-def load_mat_file(filepath: str) -> np.ndarray:
+def ood_files_for_classes(classes: list) -> list:
+    """OOD file numbers (both loads) restricted to the given fault classes."""
+    return get_files_for_condition(0, classes) + get_files_for_condition(3, classes)
+
+
+def _read_mat_file(filepath: str) -> np.ndarray:
     """
     Load vibration signal from .mat file.
     从.mat文件加载振动信号。
@@ -165,6 +194,16 @@ def load_mat_file(filepath: str) -> np.ndarray:
     
     raise ValueError(f"Could not find vibration data in {filepath}")
 
+def load_mat_file(filepath: str) -> np.ndarray:
+    """Load the drive-end signal through the shared disk cache."""
+    return load_cached_array(
+        filepath,
+        "cwru",
+        lambda source: _read_mat_file(str(source)),
+        parameters={"format": "mat", "signal": "DE_time"},
+    )
+
+
 
 def slice_windows(arr: np.ndarray, label: int, win: int = signal_size):
     """Slice signal into fixed-length windows / 将信号切分为固定长度窗口"""
@@ -182,22 +221,30 @@ def slice_windows(arr: np.ndarray, label: int, win: int = signal_size):
     return data, labels
 
 
-def data_load(filepath: str, label: int):
+def data_load(filepath: str, label: int, max_windows: int | None = None):
     """Load and slice data from a .mat file / 从.mat文件加载并切分数据"""
     arr = load_mat_file(filepath)
-    return slice_windows(arr, label, win=signal_size)
+    data, labels = slice_windows(arr, label, win=signal_size)
+    return subsample_uniform(data, labels, max_windows)
 
 
-def build_df_from_files(root: str | Path, file_list: list, class_list: list, label_dict: dict):
+def build_df_from_files(
+    root: str | Path,
+    file_list: list,
+    class_list: list,
+    label_dict: dict,
+    max_windows_per_file: int | None = None,
+):
     """
     Build DataFrame from file list.
     从文件列表构建DataFrame。
-    
+
     Args:
         root: Path to data directory
         file_list: List of file numbers
         class_list: List of class names to include
         label_dict: Mapping from class name to label
+        max_windows_per_file: Optional cap on windows kept per file
     """
     root = Path(root)
     all_data, all_labels, all_sources = [], [], []
@@ -205,20 +252,20 @@ def build_df_from_files(root: str | Path, file_list: list, class_list: list, lab
     for file_num in file_list:
         if file_num not in FILE_MAPPING:
             continue
-        
+
         fault_type, _ = FILE_MAPPING[file_num]
         if fault_type not in class_list:
             continue
-        
+
         label = label_dict[fault_type]
         filepath = root / f"{file_num}.mat"
-        
+
         if not filepath.exists():
             print(f"Warning: File not found: {filepath}")
             continue
-        
+
         try:
-            d, l = data_load(str(filepath), label)
+            d, l = data_load(str(filepath), label, max_windows_per_file)
             all_data += d
             all_labels += l
             all_sources += [fault_type] * len(d)
@@ -230,6 +277,32 @@ def build_df_from_files(root: str | Path, file_list: list, class_list: list, lab
         "label": all_labels,
         "source": all_sources,
     })
+
+
+def build_temporal_id_splits(
+    root: str | Path,
+    val_ratio: float,
+    max_windows_per_file: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split every CWRU ID recording chronologically before concatenation."""
+    root = Path(root)
+    splits = []
+    for file_num in ID_FILES:
+        fault_type, _ = FILE_MAPPING[file_num]
+        filepath = root / f"{file_num}.mat"
+        if not filepath.exists():
+            raise FileNotFoundError(f"Required CWRU ID file not found: {filepath}")
+        label = ID_LABELS[fault_type]
+        data, labels = data_load(str(filepath), label, max_windows_per_file)
+        splits.append(
+            temporal_window_split(
+                data, labels, filepath.name, val_ratio,
+                TEST_RATIO, SPLIT_GAP_WINDOWS,
+            )
+        )
+    result = concatenate_temporal_splits(splits)
+    assert_disjoint_temporal_splits(*result)
+    return result
 
 
 class CWRUDataModule(NoisyEvaluationMixin, TUDataModule):
@@ -262,12 +335,17 @@ class CWRUDataModule(NoisyEvaluationMixin, TUDataModule):
             train_transform: nn.Module | None = None,
             test_transform: nn.Module | None = None,
             ood_transform: nn.Module | None = None,
-            normlize_type: str = "-1-1",
+            normalize_type: str = "-1-1",
             pin_memory: bool = True,
             persistent_workers: bool = True,
             eval_noise: bool = False,
             noise_configs: list[tuple[str, int]] | None = None,
             split_seed: int = 12345,
+            split_mode: Literal["random", "temporal"] = "temporal",
+            ood_subset: Literal["all", "near", "far"] = "all",
+            max_id_windows_per_file: int | None = None,
+            max_ood_windows_per_file: int | None = None,
+            max_shift_windows_per_file: int | None = None,
     ) -> None:
 
         super().__init__(
@@ -291,54 +369,102 @@ class CWRUDataModule(NoisyEvaluationMixin, TUDataModule):
             for severity in range(1, 6)
         ]
         self.split_seed = split_seed
-        self.normlize_type = normlize_type
+        self.split_mode = split_mode
+        self.ood_subset = ood_subset
+        self.max_id_windows_per_file = max_id_windows_per_file
+        self.max_ood_windows_per_file = max_ood_windows_per_file
+        self.max_shift_windows_per_file = max_shift_windows_per_file
+        self.normalize_type = normalize_type
+        self._split_done = False
 
-        self.train_transform = build_transforms("train", normalize=self.normlize_type)
-        self.val_transform = build_transforms("val", normalize=self.normlize_type)
-        self.test_transform = build_transforms("val", normalize=self.normlize_type)
-        self.ood_transform = build_transforms("val", normalize=self.normlize_type)
+        self.train_transform = build_transforms("train", normalize=self.normalize_type)
+        self.val_transform = build_transforms("val", normalize=self.normalize_type)
+        self.test_transform = build_transforms("val", normalize=self.normalize_type)
+        self.ood_transform = build_transforms("val", normalize=self.normalize_type)
+
+    def _ood_class_list(self) -> list:
+        if self.ood_subset == "near":
+            return OOD_CLASSES_NEAR
+        if self.ood_subset == "far":
+            return OOD_CLASSES_FAR
+        return OOD_CLASSES
+
+    def _build_splits(self) -> None:
+        if self._split_done:
+            return
+        if not self.val_split:
+            raise ValueError(
+                "val_split must be positive to keep validation and test sets separate."
+            )
+        root = Path(self.root)
+        if self.split_mode == "temporal":
+            self.train_df, self.val_df, self.test_df = build_temporal_id_splits(
+                root, self.val_split, self.max_id_windows_per_file
+            )
+        else:
+            id_df = build_df_from_files(
+                root, ID_FILES, ID_CLASSES, ID_LABELS, self.max_id_windows_per_file
+            )
+            # Test cut uses a fixed shuffle seed, independent of the model seed.
+            pool_df, self.test_df = random_pool_test_split(id_df, TEST_RATIO)
+            self.train_df, self.val_df = stratified_split(
+                pool_df, self.val_split, self.split_seed
+            )
+        if self.eval_ood:
+            classes = self._ood_class_list()
+            self.ood_df = build_df_from_files(
+                root, ood_files_for_classes(classes), classes, OOD_LABELS,
+                self.max_ood_windows_per_file,
+            )
+        if self.eval_shift:
+            self.shift_df = build_df_from_files(
+                root, SHIFT_FILES, ID_CLASSES, ID_LABELS,
+                self.max_shift_windows_per_file,
+            )
+        self._split_done = True
 
     def setup(self, stage: Literal["fit", "test"] | None = None) -> None:
         if getattr(self, "_noisy_mode", False):
             return
-        if not self.val_split:
-            raise ValueError("val_split must be positive to keep validation and test sets separate.")
-        root = Path(self.root)
-        
-        # Build ID data (0HP load)
-        id_df = build_df_from_files(root, ID_FILES, ID_CLASSES, ID_LABELS)
-        id_df = id_df.sample(frac=1, random_state=42).reset_index(drop=True)
-        
-        # Train/test split
-        test_ratio = 0.2
-        test_size = int(len(id_df) * test_ratio)
-        self.test_df = id_df.iloc[:test_size].reset_index(drop=True)
-        train_df = id_df.iloc[test_size:].reset_index(drop=True)
-
-        if stage in ("fit", None):
-            full = dataset(list_data=train_df, transform=self.train_transform)
-            if self.val_split:
-                self.train, self.val = create_train_val_split(
-                    full, self.val_split,
-                    self.test_transform, self.split_seed)
+        self._build_splits()
+        self.train = dataset(
+            list_data=self.train_df, transform=self.train_transform
+        )
+        self.val = dataset(
+            list_data=self.val_df, transform=self.test_transform
+        )
         if stage in ("test", None):
-            full = dataset(list_data=train_df, transform=self.train_transform)
-            if self.val_split:
-                self.train, self.val = create_train_val_split(
-                    full, self.val_split,
-                    self.test_transform, self.split_seed)
-            self.test = dataset(list_data=self.test_df, transform=self.test_transform)
-
-        # OOD data: Outer Race faults (never seen in training)
+            self.test = dataset(
+                list_data=self.test_df, transform=self.test_transform
+            )
         if self.eval_ood:
-            self.ood_df = build_df_from_files(root, OOD_FILES, OOD_CLASSES, OOD_LABELS)
-            self.ood = dataset(list_data=self.ood_df, transform=self.ood_transform)
-
-        # Shift data: Same classes at different load (3HP)
+            self.ood = dataset(
+                list_data=self.ood_df, transform=self.ood_transform
+            )
         if self.eval_shift:
-            shift_df = build_df_from_files(root, SHIFT_FILES, ID_CLASSES, ID_LABELS)
-            self.shift = dataset(list_data=shift_df, transform=self.test_transform)
+            self.shift = dataset(
+                list_data=self.shift_df, transform=self.test_transform
+            )
 
+
+    def split_summary(self) -> str:
+        """打印各划分的样本数与每类分布，用于确认划分不随 seed 变化。"""
+        self._build_splits()
+        lines = [f"split_mode={self.split_mode}"]
+        for name, df in [("train", self.train_df), ("val", self.val_df),
+                         ("test", self.test_df)]:
+            counts = df["label"].value_counts().sort_index().to_dict()
+            lines.append(f"{name:6s} n={len(df):5d}  per-class={counts}")
+        if self.eval_ood:
+            lines.append(f"{'ood':6s} n={len(self.ood_df):5d}  "
+                         f"subset={self.ood_subset}  "
+                         f"max_per_file={self.max_ood_windows_per_file}")
+        if self.eval_shift:
+            lines.append(f"{'shift':6s} n={len(self.shift_df):5d}")
+        return "\n".join(lines)
+
+
+    
     def test_dataloader(self) -> list[DataLoader]:
         dataloaders = [
             self._data_loader(self.get_test_set(), training=False, shuffle=False)
@@ -354,44 +480,28 @@ class CWRUDataModule(NoisyEvaluationMixin, TUDataModule):
         return dataloaders
 
 
-# =============================================================================
-# Utility functions / 工具函数
-# =============================================================================
 
-def print_dataset_info(root: str | Path):
-    """Print dataset information / 打印数据集信息"""
-    root = Path(root)
-    
-    print("=" * 60)
-    print("CWRU Bearing Dataset Info / CWRU轴承数据集信息")
-    print("=" * 60)
-    
-    # Check available files
-    available = []
-    missing = []
-    for file_num in FILE_MAPPING.keys():
-        filepath = root / f"{file_num}.mat"
-        if filepath.exists():
-            available.append(file_num)
-        else:
-            missing.append(file_num)
-    
-    print(f"Available files / 可用文件: {len(available)}")
-    print(f"Missing files / 缺失文件: {len(missing)}")
-    
-    if missing:
-        print(f"\nMissing file numbers: {missing[:10]}{'...' if len(missing) > 10 else ''}")
-    
-    # Class distribution
-    print("\n" + "-" * 40)
-    print("ID Classes (for training) / ID类别 (用于训练):")
-    for cls in ID_CLASSES:
-        files = [f for f in available if FILE_MAPPING.get(f, (None,))[0] == cls]
-        print(f"  {cls}: {len(files)} files")
-    
-    print("\nOOD Classes (unseen) / OOD类别 (未见):")
-    for cls in OOD_CLASSES:
-        files = [f for f in available if FILE_MAPPING.get(f, (None,))[0] == cls]
-        print(f"  {cls}: {len(files)} files")
-    
-    print("=" * 60)
+
+if __name__ == "__main__":
+    import torch
+
+    for mode in ["random", "temporal"]:
+        print(f"\n{'=' * 60}\n  split_mode = {mode}\n{'=' * 60}")
+        fingerprints = []
+        for s in [0, 1, 2]:
+            torch.manual_seed(s)
+            np.random.seed(s)
+            dm = CWRUDataModule(root="/mnt/d/Data/Machine/CWRU", batch_size=64,
+                               val_split=0.2, eval_ood=True, split_mode=mode)
+            dm.setup("test")
+            print(f"\n--- global seed {s} ---")
+            print(dm.split_summary())
+            fp = hashlib.md5(
+                str(dm.val_df["label"].tolist()
+                    + [float(a.sum()) for a in dm.val_df["data"]]).encode()
+            ).hexdigest()[:12]
+            fingerprints.append(fp)
+            print("val fingerprint:", fp)
+
+        print("\n划分是否稳定:",
+              "是" if len(set(fingerprints)) == 1 else "否 —— 仍受全局随机状态影响")

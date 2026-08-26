@@ -17,7 +17,15 @@ import numpy as np
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from analysis.methods import PLOT_METHODS, plot_method_sort_key
 from analysis.visualization.io import display_method, save_figure
+from analysis.visualization.style import (
+    DOUBLE_COLUMN_MM,
+    LINE_WIDTH,
+    SUBMISSION_DPI,
+    figure_size,
+    method_color,
+)
 
 METRICS = {
     "test/cls/Acc": ("ACC", True),
@@ -39,6 +47,8 @@ def _load_noise_data(
     clean = {}
     for record in summary.values():
         method = record.get("method")
+        if method not in PLOT_METHODS:
+            continue
         if record.get("dataset") != dataset or record.get("backbone") != backbone:
             continue
         if selected and method not in selected:
@@ -58,9 +68,10 @@ def _load_noise_data(
 
 
 def plot_noise_type(noise: str, methods: dict, dataset: str, backbone: str) -> plt.Figure:
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    colors = plt.cm.tab20(np.linspace(0, 1, max(1, len(methods))))
-    for color, (method, severities) in zip(colors, sorted(methods.items())):
+    fig, axes = plt.subplots(
+        1, 3, figsize=figure_size(DOUBLE_COLUMN_MM, 75)
+    )
+    for method, severities in sorted(methods.items(), key=lambda item: plot_method_sort_key(item[0])):
         x = np.asarray(sorted(severities))
         for ax, (metric, (label, _)) in zip(axes, METRICS.items()):
             valid = [severity for severity in x if metric in severities[severity]]
@@ -68,15 +79,14 @@ def plot_noise_type(noise: str, methods: dict, dataset: str, backbone: str) -> p
                 continue
             means = np.asarray([severities[s][metric]["mean"] for s in valid]) * 100
             stds = np.asarray([severities[s][metric].get("std", 0.0) or 0.0 for s in valid]) * 100
-            ax.plot(valid, means, marker="o", linewidth=1.6, color=color, label=display_method(method))
-            ax.fill_between(valid, means - stds, means + stds, color=color, alpha=0.1)
+            ax.plot(valid, means, marker="o", linewidth=LINE_WIDTH, color=method_color(method), label=display_method(method))
+            ax.fill_between(valid, means - stds, means + stds, color=method_color(method), alpha=0.1)
     for ax, (_, (label, higher)) in zip(axes, METRICS.items()):
         ax.set(title=f"{label} {'↑' if higher else '↓'}", xlabel="Severity (0 = clean)", ylabel="Percent (%)")
         ax.set_xticks(range(6))
         ax.grid(alpha=0.3)
-    axes[-1].legend(fontsize=8, bbox_to_anchor=(1.02, 1), loc="upper left")
-    fig.suptitle(f"{dataset} / {backbone} — {noise}")
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    axes[-1].legend(bbox_to_anchor=(1.02, 1), loc="upper left")
+    fig.tight_layout()
     return fig
 
 
@@ -87,7 +97,7 @@ def generate_noise_plots(
     backbone: str,
     methods: list[str] | None = None,
     noise_type: str | None = None,
-    dpi: int = 300,
+    dpi: int = SUBMISSION_DPI,
 ) -> list[Path]:
     data = _load_noise_data(summary, dataset, backbone, methods)
     if noise_type:
@@ -114,7 +124,7 @@ def main() -> None:
         "--output-dir",
         default=str(_PROJECT_ROOT / "results" / "figures" / "noise"),
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=SUBMISSION_DPI)
     args = parser.parse_args()
     for path in generate_noise_plots(
         args.summary, args.output_dir, args.dataset, args.backbone,

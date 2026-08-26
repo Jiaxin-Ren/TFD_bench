@@ -277,6 +277,23 @@ mgb
 
 数据输入统一为一维时域信号。一键运行多个数据集时，在 `datasets` 列表中为每个数据集同时填写 `name` 和 `root`。直接运行单个 method 时，默认使用列表中的第一个数据集，也可以通过 `--dataset` 和 `--data-root` 覆盖。
 
+### 数据缓存
+
+所有数据集共用持久化信号缓存。首次运行时，loader 会读取原始
+CSV、MAT、TXT 或 NPY 文件并完成确定性的文件级预处理；后续方法、
+模型和随机种子会直接复用缓存，不再反复解析原始文件。窗口划分、
+数据划分、数据增强和归一化仍按当前实验配置执行，不会被缓存固化。
+
+默认缓存目录为：
+
+~~~text
+~/.cache/tfd_bench/datasets/<dataset>/
+~~~
+
+源文件路径、大小、修改时间或预处理参数变化时，缓存会自动失效。
+如需把缓存放到其他磁盘，可设置环境变量 TFD_DATA_CACHE。
+
+
 ## 输出结构
 
 默认结果保存在：
@@ -343,9 +360,11 @@ python analysis/collect_results.py \
 python analysis/generate_report.py
 ```
 
-输出统一保存在 `results/summary.json`、`results/tables/` 和 `results/figures/`。该命令默认
-从图片中排除共形预测方法；如需包含它们，添加 `--include-conformal`。训练命令不会自动
-执行报告生成。
+输出统一保存在 `results/summary.json`、`results/tables/` 和 `results/figures/`。统计与绘图
+只包含论文方法表中的 TS、VBNN、SGLD、SGHMC、DE、SE、BE、PE、SWAG、LA、MCD、
+MCBN 和 EDL，并按该顺序展示。Max Softmax、Checkpoint Ensemble 和 Conformal 方法的
+原始实验结果仍会保留，但不会进入汇总统计、结果表格或图片。训练命令不会自动执行
+报告生成。ECE 的训练评估、seed stability 与 reliability diagram 均统一使用 10 个分箱。
 
 也可以单独生成对比表格：
 
@@ -395,14 +414,7 @@ SWAG 属于 posterior sampling 方法，评估训练结束时形成的完整样�
 python analysis/visualization/plot_all.py
 ```
 
-`plot_all.py` 默认排除 `conformal_aps`、`conformal_raps` 和 `conformal_thr`。
-需要把共形预测加入图片时使用：
-
-```bash
-python analysis/visualization/plot_all.py --include-conformal
-```
-
-也可以排除任意其他方法：
+还可以从上述 13 种方法中进一步排除任意方法：
 
 ```bash
 python analysis/visualization/plot_all.py --exclude-methods swag sgld sghmc
@@ -410,10 +422,16 @@ python analysis/visualization/plot_all.py --exclude-methods swag sgld sghmc
 
 对比图中的点为多个随机种子的均值，误差线为样本标准差。不同噪声类型分别成图，
 不会把 Gaussian、Impulse 等不同噪声首尾连接。需要先清理之前生成的图片时使用：
+图片不设置数据集、模型或测试配置形式的总标题，这些信息由
+`results/figures/<dataset>/<backbone>/<config>_<figure>.png` 路径和文件名表达；
+多子图内部用于识别方法或指标的短标签仍会保留。
 选择性分类同时记录 AURC、AUGRC、Cov@5%Risk 和 Risk@80%Cov。
 `plot_all.py` 会为 clean、operating shift 和每个噪声配置生成
-`<config>_selective.png`，并基于各方法的原生不确定性生成对应的风险—覆盖图；
-噪声严重度趋势另存为 `noise_<type>_selective.png`。
+`<config>_selective.png`、`<config>_reliability.png` 和
+`<config>_ood_scores.png`。其中可靠性图展示 Accuracy、Calibration gap 和百分数形式的
+ECE，OOD 分数图比较各方法原生不确定性在 ID 与 OOD 样本上的分布。程序还会基于原生
+不确定性生成对应的风险—覆盖图；噪声严重度趋势另存为
+`noise_<type>_selective.png`。ROC/PR 和 seed stability 仍仅针对 clean 配置生成。
 
 
 ```bash
@@ -436,7 +454,7 @@ python analysis/visualization/risk_coverage.py --dataset seu --backbone resnet
 python analysis/visualization/seed_stability.py --dataset seu --backbone resnet
 ```
 
-所有独立命令都支持 `--methods edl max_softmax`、`--config clean`、`--output`（噪声图使用
+所有独立命令都支持 `--methods edl deep_ensemble`、`--config clean`、`--output`（噪声图使用
 `--output-dir`）等筛选参数，可用 `python <文件> --help` 查看完整参数。可靠性、ROC/PR、
 OOD 分数分布、风险—覆盖和 seed 稳定性必须使用逐样本预测；旧结果中若没有
 `predictions/*.npz`，需要用当前代码重跑相应方法一次。训练不会自动画图，只有显式运行上述

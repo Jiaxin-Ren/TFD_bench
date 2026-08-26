@@ -21,7 +21,17 @@ Subsets:
 - data5: Outer fault bearing (25 conditions, 450 samples)
 """
 
+import hashlib
+import sys, warnings
+
+warnings.filterwarnings('ignore')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
 import numpy as np
+from src.datasets.cache import load_cached_array
 import pandas as pd
 from pathlib import Path
 from torch import nn
@@ -30,11 +40,20 @@ from src.datasets.datamodule import TUDataModule
 from src.datasets.base_dataset import dataset
 from src.datasets.noise import NoisyEvaluationMixin
 from src.datasets.transforms import build_transforms
-from src.datasets.utils import create_train_val_split
+from src.datasets.utils import (
+    assert_disjoint_temporal_splits,
+    concatenate_temporal_splits,
+    temporal_window_split,
+    subsample_uniform,
+    random_pool_test_split,
+    stratified_split,
+)
 from typing import Literal, List, Optional, Union
 
 # Default signal size (can be overridden)
 signal_size = 1024
+TEST_RATIO = 0.2
+SPLIT_GAP_WINDOWS = 1
 
 # ID data: Normal + Inner fault
 ID_FILES = ["data1.npy", "data3.npy"]
@@ -47,13 +66,18 @@ SHIFT_LABELS = [0, 1]  # Same label mapping
 # OOD data: Outer fault (unseen fault type)
 OOD_FILES = ["data5.npy"]
 OOD_LABEL = -1
+# HIT only ships a single OOD recording, so there is no near/far grouping to
+# make: "near"/"far"/"all" all resolve to the same file list.
+OOD_FILES_NEAR = OOD_FILES
+OOD_FILES_FAR = OOD_FILES
 
 
 def load_npy_data(
-    filepath: Path, 
-    label: int, 
+    filepath: Path,
+    label: int,
     signal_size: int = 1024,
-    channels: Optional[List[int]] = None
+    channels: Optional[List[int]] = None,
+    max_windows: int | None = None,
 ) -> tuple:
     """
     Load .npy file and slice samples.
@@ -70,59 +94,88 @@ def load_npy_data(
     Returns:
         (data_list, label_list)
     """
-    arr = np.load(filepath)  # N×6×20480
-    data, labels = [], []
-    
-    # Default: use all channels
     if channels is None:
         channels = list(range(6))
-    
-    for sample in arr:  # sample: 6×20480
-        # Select channels
-        sample = sample[channels, :]  # len(channels)×20480
-        
-        # Truncate to signal_size
-        if signal_size < sample.shape[1]:
-            sample = sample[:, :signal_size]  # len(channels)×signal_size
-        
-        # Transpose to (L, C) to match transforms expectation
-        # (L, C) -> Transpose -> (C, L) which is (channels, seq_len)
-        sample = sample.T
-        
-        data.append(sample)
-        labels.append(label)
-    
-    return data, labels
+    selected_channels = list(channels)
+
+    def parse(source: Path) -> np.ndarray:
+        raw = np.load(source, allow_pickle=False, mmap_mode="r")
+        selected = raw[:, selected_channels, :signal_size]
+        return selected.transpose(0, 2, 1)
+
+    arr = load_cached_array(
+        filepath,
+        "hit",
+        parse,
+        parameters={
+            "format": "npy",
+            "channels": selected_channels,
+            "signal_size": signal_size,
+            "layout": "NLC",
+        },
+    )
+    data = [sample for sample in arr]
+    labels = [label] * len(data)
+
+    return subsample_uniform(data, labels, max_windows)
 
 
 def build_df_from_files(
-    root: Path, 
-    file_list: List[str], 
+    root: Path,
+    file_list: List[str],
     label_list: List[int],
     signal_size: int = 1024,
-    channels: Optional[List[int]] = None
+    channels: Optional[List[int]] = None,
+    max_windows_per_file: int | None = None,
 ) -> pd.DataFrame:
     """
     Build DataFrame from multiple .npy files.
     从多个 .npy 文件构建 DataFrame。
     """
     all_data, all_labels, all_sources = [], [], []
-    
+
     for fname, lbl in zip(file_list, label_list):
         path = root / fname
         if not path.exists():
             print(f"Warning: {path} not found, skipping...")
             continue
-        d, l = load_npy_data(path, lbl, signal_size, channels)
+        d, l = load_npy_data(path, lbl, signal_size, channels, max_windows_per_file)
         all_data += d
         all_labels += l
         all_sources += [fname] * len(d)
-    
+
     return pd.DataFrame({
         "data": all_data,
         "label": all_labels,
         "source": all_sources,
     })
+
+
+def build_temporal_id_splits(
+    root: Path,
+    val_ratio: float,
+    signal_size: int,
+    channels: Optional[List[int]],
+    max_windows_per_file: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split every HIT ID array chronologically before concatenation."""
+    splits = []
+    for filename, label in zip(ID_FILES, ID_LABELS):
+        filepath = root / filename
+        if not filepath.exists():
+            raise FileNotFoundError(f"Required HIT ID file not found: {filepath}")
+        data, labels = load_npy_data(
+            filepath, label, signal_size, channels, max_windows_per_file
+        )
+        splits.append(
+            temporal_window_split(
+                data, labels, filename, val_ratio,
+                TEST_RATIO, SPLIT_GAP_WINDOWS,
+            )
+        )
+    result = concatenate_temporal_splits(splits)
+    assert_disjoint_temporal_splits(*result)
+    return result
 
 
 class HITDataModule(NoisyEvaluationMixin, TUDataModule):
@@ -178,6 +231,11 @@ class HITDataModule(NoisyEvaluationMixin, TUDataModule):
             eval_noise: bool = False,
             noise_configs: list[tuple[str, int]] | None = None,
             split_seed: int = 12345,
+            split_mode: Literal["random", "temporal"] = "temporal",
+            ood_subset: Literal["all", "near", "far"] = "all",
+            max_id_windows_per_file: int | None = None,
+            max_ood_windows_per_file: int | None = None,
+            max_shift_windows_per_file: int | None = None,
     ) -> None:
         super().__init__(
             root=root,
@@ -209,62 +267,102 @@ class HITDataModule(NoisyEvaluationMixin, TUDataModule):
             for severity in range(1, 6)
         ]
         self.split_seed = split_seed
+        self.split_mode = split_mode
+        self.ood_subset = ood_subset
+        self.max_id_windows_per_file = max_id_windows_per_file
+        self.max_ood_windows_per_file = max_ood_windows_per_file
+        self.max_shift_windows_per_file = max_shift_windows_per_file
         self.normalize_type = normalize_type
 
         self.train_transform = build_transforms("train", normalize=self.normalize_type)
+        self._split_done = False
         self.val_transform = build_transforms("val", normalize=self.normalize_type)
         self.test_transform = build_transforms("val", normalize=self.normalize_type)
         self.ood_transform = build_transforms("val", normalize=self.normalize_type)
 
+    def _ood_file_list(self) -> List[str]:
+        if self.ood_subset == "near":
+            return OOD_FILES_NEAR
+        if self.ood_subset == "far":
+            return OOD_FILES_FAR
+        return OOD_FILES
+
+    def _build_splits(self) -> None:
+        if self._split_done:
+            return
+        if not self.val_split:
+            raise ValueError(
+                "val_split must be positive to keep validation and test sets separate."
+            )
+        root = Path(self.root)
+        if self.split_mode == "temporal":
+            self.train_df, self.val_df, self.test_df = build_temporal_id_splits(
+                root, self.val_split, self.signal_size, self.channels,
+                self.max_id_windows_per_file,
+            )
+        else:
+            id_df = build_df_from_files(
+                root, ID_FILES, ID_LABELS, self.signal_size, self.channels,
+                self.max_id_windows_per_file,
+            )
+            # Test cut uses a fixed shuffle seed, independent of the model seed.
+            pool_df, self.test_df = random_pool_test_split(id_df, TEST_RATIO)
+            self.train_df, self.val_df = stratified_split(
+                pool_df, self.val_split, self.split_seed
+            )
+        if self.eval_ood:
+            self.ood_df = build_df_from_files(
+                root, self._ood_file_list(), [OOD_LABEL],
+                self.signal_size, self.channels, self.max_ood_windows_per_file,
+            )
+        if self.eval_shift:
+            self.shift_df = build_df_from_files(
+                root, SHIFT_FILES, SHIFT_LABELS,
+                self.signal_size, self.channels, self.max_shift_windows_per_file,
+            )
+        self._split_done = True
+
     def setup(self, stage: Literal["fit", "test"] | None = None) -> None:
         if getattr(self, "_noisy_mode", False):
             return
-        if not self.val_split:
-            raise ValueError("val_split must be positive to keep validation and test sets separate.")
-        root = Path(self.root)
-
-        # Build ID dataset
-        id_df = build_df_from_files(
-            root, ID_FILES, ID_LABELS, 
-            self.signal_size, self.channels
+        self._build_splits()
+        self.train = dataset(
+            list_data=self.train_df, transform=self.train_transform
         )
-        id_df = id_df.sample(frac=1, random_state=42).reset_index(drop=True)
-        
-        # Train/test split (80/20)
-        test_ratio = 0.2
-        test_size = int(len(id_df) * test_ratio)
-        self.test_df = id_df.iloc[:test_size].reset_index(drop=True)
-        train_df = id_df.iloc[test_size:].reset_index(drop=True)
-
-        if stage in ("fit", None):
-            full = dataset(list_data=train_df, transform=self.train_transform)
-            if self.val_split:
-                self.train, self.val = create_train_val_split(
-                    full, self.val_split, self.test_transform, self.split_seed
-                )
+        self.val = dataset(
+            list_data=self.val_df, transform=self.test_transform
+        )
         if stage in ("test", None):
-            full = dataset(list_data=train_df, transform=self.train_transform)
-            if self.val_split:
-                self.train, self.val = create_train_val_split(
-                    full, self.val_split, self.test_transform, self.split_seed
-                )
-            self.test = dataset(list_data=self.test_df, transform=self.test_transform)
-
-        # OOD dataset: Outer fault
+            self.test = dataset(
+                list_data=self.test_df, transform=self.test_transform
+            )
         if self.eval_ood:
-            self.ood_df = build_df_from_files(
-                root, OOD_FILES, [OOD_LABEL],
-                self.signal_size, self.channels
+            self.ood = dataset(
+                list_data=self.ood_df, transform=self.ood_transform
             )
-            self.ood = dataset(list_data=self.ood_df, transform=self.ood_transform)
-
-        # Shift dataset: Different conditions
         if self.eval_shift:
-            shift_df = build_df_from_files(
-                root, SHIFT_FILES, SHIFT_LABELS,
-                self.signal_size, self.channels
+            self.shift = dataset(
+                list_data=self.shift_df, transform=self.test_transform
             )
-            self.shift = dataset(list_data=shift_df, transform=self.test_transform)
+
+
+    def split_summary(self) -> str:
+        """打印各划分的样本数与每类分布，用于确认划分不随 seed 变化。"""
+        self._build_splits()
+        lines = [f"split_mode={self.split_mode}"]
+        for name, df in [("train", self.train_df), ("val", self.val_df),
+                         ("test", self.test_df)]:
+            counts = df["label"].value_counts().sort_index().to_dict()
+            lines.append(f"{name:6s} n={len(df):5d}  per-class={counts}")
+        if self.eval_ood:
+            lines.append(f"{'ood':6s} n={len(self.ood_df):5d}  "
+                         f"subset={self.ood_subset}  "
+                         f"max_per_file={self.max_ood_windows_per_file}")
+        if self.eval_shift:
+            lines.append(f"{'shift':6s} n={len(self.shift_df):5d}")
+        return "\n".join(lines)
+    
+
 
     def test_dataloader(self) -> list[DataLoader]:
         dataloaders = [
@@ -279,3 +377,28 @@ class HITDataModule(NoisyEvaluationMixin, TUDataModule):
                 self._data_loader(self.get_shift_set(), training=False, shuffle=False)
             )
         return dataloaders
+
+
+if __name__ == "__main__":
+    import torch
+
+    for mode in ["random", "temporal"]:
+        print(f"\n{'=' * 60}\n  split_mode = {mode}\n{'=' * 60}")
+        fingerprints = []
+        for s in [0, 1, 2]:
+            torch.manual_seed(s)
+            np.random.seed(s)
+            dm = HITDataModule(root="/mnt/d/Data/Machine/HIT", batch_size=64,
+                               val_split=0.2, eval_ood=True, split_mode=mode)
+            dm.setup("test")
+            print(f"\n--- global seed {s} ---")
+            print(dm.split_summary())
+            fp = hashlib.md5(
+                str(dm.val_df["label"].tolist()
+                    + [float(a.sum()) for a in dm.val_df["data"]]).encode()
+            ).hexdigest()[:12]
+            fingerprints.append(fp)
+            print("val fingerprint:", fp)
+
+        print("\n划分是否稳定:",
+              "是" if len(set(fingerprints)) == 1 else "否 —— 仍受全局随机状态影响")

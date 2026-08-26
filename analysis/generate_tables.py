@@ -9,11 +9,20 @@ Usage:
 import argparse
 import json
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
+
+from analysis.methods import (
+    BENCHMARK_METHODS,
+    METHOD_ABBREVIATIONS,
+    method_sort_key,
+)  # noqa: E402
+
 DEFAULT_METRICS = ("test/cls/Acc", "test/cal/ECE", "ood/AUROC")
 
 METRIC_CONFIG = {
@@ -46,26 +55,7 @@ def _metric_config(metric: str) -> dict[str, Any]:
         }
     return METRIC_CONFIG.get(metric, {"name": metric})
 
-METHOD_NAMES = {
-    "max_softmax":         "Max Softmax",
-    "deep_ensemble":       "Deep Ensembles",
-    "packed_ensemble":     "Packed Ensembles",
-    "batch_ensemble":      "Batch Ensembles",
-    "snapshot_ensemble":   "Snapshot Ens.",
-    "checkpoint_ensemble": "Checkpoint Ens.",
-    "variational_bnn":     "Variational BNN",
-    "swag":                "SWAG",
-    "sgld":                "MCMC-SGLD",
-    "sghmc":               "MCMC-SGHMC",
-    "edl":                 "EDL",
-    "conformal_aps":       "Conformal (APS)",
-    "conformal_raps":      "Conformal (RAPS)",
-    "conformal_thr":       "Conformal (THR)",
-    "temperature_scaling": "Temp. Scaling",
-    "laplace_approx":      "Laplace Approx",
-    "mc_dropout":          "MC Dropout",
-    "mc_batch_norm":       "MC BatchNorm",
-}
+METHOD_NAMES = METHOD_ABBREVIATIONS
 CONFIG_NAMES = {
     "clean": "Clean",
     "operating_shift": "Operating shift",
@@ -122,12 +112,20 @@ def _group_results(results):
     """Group methods into separate tables per dataset/backbone/test config."""
     groups = defaultdict(dict)
     for key, stats in results.items():
+        method = stats.get("method", "unknown")
+        if method not in BENCHMARK_METHODS:
+            continue
         group_key = (
             stats.get("dataset", "unknown"),
             stats.get("backbone", "unknown"),
             stats.get("config", "clean"),
         )
         groups[group_key][key] = stats
+    for group_key, group in groups.items():
+        groups[group_key] = dict(sorted(
+            group.items(),
+            key=lambda item: method_sort_key(item[1].get("method", "unknown")),
+        ))
     return sorted(
         groups.items(),
         key=lambda item: (item[0][0], item[0][1], _config_sort_key(item[0][2])),

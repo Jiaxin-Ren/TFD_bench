@@ -9,12 +9,16 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 
+from analysis.methods import BENCHMARK_METHODS, PLOT_METHOD_ORDER, display_method
 from analysis.collect_results import collect_from_results_dir, compute_summary_statistics
 from analysis.generate_tables import _group_results, generate_markdown_table
+from analysis.visualization.reliability import plot_reliability_diagram
+from analysis.visualization.uncertainty import generate_uncertainty_plot
 from src.metrics import AURC, CovAt5Risk
 from analysis.visualization.io import discover_prediction_runs, finite_ood_score_pair
 from analysis.visualization.plot_all import (
@@ -22,14 +26,39 @@ from analysis.visualization.plot_all import (
     _group_results as group_plot_results,
 )
 from analysis.visualization.risk_coverage import _risk_coverage
+from analysis.visualization.style import (
+    AXIS_LABEL_SIZE,
+    DOUBLE_COLUMN_MM,
+    FONT_FAMILY,
+    FONT_SIZE,
+    LEGEND_SIZE,
+    SUBMISSION_DPI,
+    figure_size,
+)
 from src.training.experiment import _build_summary, _write_manifest, evaluate
 
-
 class ResultSchemaTests(unittest.TestCase):
+    def test_plot_scope_places_msp_first_without_adding_it_to_uq_tables(self) -> None:
+        self.assertEqual(PLOT_METHOD_ORDER[0], "max_softmax")
+        self.assertEqual(display_method("max_softmax"), "MSP")
+        self.assertNotIn("max_softmax", BENCHMARK_METHODS)
+
+    def test_publication_style_has_one_typographic_scale(self) -> None:
+        self.assertEqual(plt.rcParams["font.family"], [FONT_FAMILY])
+        self.assertEqual(float(plt.rcParams["font.size"]), FONT_SIZE)
+        self.assertEqual(
+            float(plt.rcParams["axes.labelsize"]), AXIS_LABEL_SIZE
+        )
+        width, height = figure_size(DOUBLE_COLUMN_MM, 125)
+        self.assertAlmostEqual(width, 190 / 25.4)
+        self.assertAlmostEqual(height, 125 / 25.4)
+        self.assertEqual(SUBMISSION_DPI, 500)
+        self.assertEqual(float(plt.rcParams["legend.fontsize"]), LEGEND_SIZE)
+
     def test_collects_runs_and_computes_seed_statistics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            method_dir = root / "demo" / "resnet" / "max_softmax"
+            method_dir = root / "demo" / "resnet" / "deep_ensemble"
             method_dir.mkdir(parents=True)
             with (method_dir / "runs.csv").open("w", newline="", encoding="utf-8") as stream:
                 writer = csv.DictWriter(
@@ -46,15 +75,44 @@ class ResultSchemaTests(unittest.TestCase):
             summary = compute_summary_statistics(records)
 
         self.assertEqual(len(records), 2)
-        stats = summary["demo/resnet/max_softmax/clean"]
+        stats = summary["demo/resnet/deep_ensemble/clean"]
         self.assertEqual(stats["n_runs"], 2)
         self.assertAlmostEqual(stats["metrics"]["test/cls/Acc"]["mean"], 0.9)
         self.assertEqual(stats["metrics"]["ood/AUROC"]["n"], 2)
 
-    def test_operating_shift_is_collected_filtered_and_tabled(self) -> None:
+    def test_msp_is_collected_for_plots_but_excluded_from_uq_tables(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             method_dir = root / "demo" / "resnet" / "max_softmax"
+            method_dir.mkdir(parents=True)
+            with (method_dir / "runs.csv").open(
+                "w", newline="", encoding="utf-8"
+            ) as stream:
+                writer = csv.DictWriter(
+                    stream,
+                    fieldnames=[
+                        "seed", "config", "test/cls/Acc",
+                        "test/cal/ECE", "ood/AUROC",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "seed": 0, "config": "clean", "test/cls/Acc": 0.9,
+                        "test/cal/ECE": 0.1, "ood/AUROC": 0.8,
+                    }
+                )
+            summary = compute_summary_statistics(
+                collect_from_results_dir(str(root))
+            )
+
+        self.assertIn("demo/resnet/max_softmax/clean", summary)
+        self.assertEqual(_group_results(summary), [])
+
+    def test_operating_shift_is_collected_filtered_and_tabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            method_dir = root / "demo" / "resnet" / "deep_ensemble"
             method_dir.mkdir(parents=True)
             with (method_dir / "runs.csv").open("w", newline="", encoding="utf-8") as stream:
                 writer = csv.DictWriter(
@@ -125,7 +183,7 @@ class ResultSchemaTests(unittest.TestCase):
     def test_prediction_loader_ignores_legacy_object_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            pred_dir = root / "demo" / "resnet" / "max_softmax" / "seed0" / "predictions"
+            pred_dir = root / "demo" / "resnet" / "deep_ensemble" / "seed0" / "predictions"
             pred_dir.mkdir(parents=True)
             np.savez(
                 pred_dir / "clean.npz",
@@ -137,12 +195,61 @@ class ResultSchemaTests(unittest.TestCase):
             grouped = discover_prediction_runs(
                 root, dataset="demo", backbone="resnet", config="clean"
             )
-            arrays = grouped["max_softmax"][0][1]
+            arrays = grouped["deep_ensemble"][0][1]
             id_scores, ood_scores = finite_ood_score_pair(arrays)
 
         self.assertEqual(id_scores.tolist(), [0.1])
         self.assertEqual(ood_scores.tolist(), [0.8])
         self.assertNotIn("ood_criterion", arrays)
+
+    def test_reliability_plot_shows_percent_ece_and_hatched_gap(self) -> None:
+        fig = plot_reliability_diagram(
+            confidences=np.array([0.2, 0.8]),
+            correctness=np.array([0.0, 1.0]),
+            n_bins=2,
+            title="Demo",
+        )
+        try:
+            ax = fig.axes[0]
+            labels = [text.get_text() for text in ax.texts]
+            hatched = [patch for patch in ax.patches if patch.get_hatch() == "///"]
+            self.assertIn("ECE=20.00%", labels)
+            self.assertEqual(len(hatched), 2)
+            self.assertEqual(ax.get_title(), "Demo")
+            self.assertEqual(ax.get_box_aspect(), 1.0)
+        finally:
+            plt.close(fig)
+
+    def test_operating_shift_score_plot_compares_clean_and_shift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pred_dir = root / "demo" / "resnet" / "deep_ensemble" / "seed0" / "predictions"
+            pred_dir.mkdir(parents=True)
+            np.savez(
+                pred_dir / "clean.npz",
+                id_ood_scores=np.array([0.1, 0.2]),
+            )
+            np.savez(
+                pred_dir / "operating_shift.npz",
+                id_ood_scores=np.array([0.4, 0.7]),
+            )
+            fig = generate_uncertainty_plot(
+                root,
+                "demo",
+                "resnet",
+                config="operating_shift",
+            )
+        try:
+            _, labels = fig.axes[0].get_legend_handles_labels()
+            self.assertTrue(any(label.startswith("Clean ID") for label in labels))
+            self.assertTrue(any(label.startswith("Operating shift") for label in labels))
+        finally:
+            self.assertEqual(len(fig.axes), 15)
+            legend = fig.axes[-1].get_legend()
+            self.assertIsNotNone(legend)
+            self.assertEqual(legend._loc, 4)
+
+            plt.close(fig)
 
 
     def test_selective_metrics_use_native_uncertainty_ordering(self) -> None:
@@ -171,10 +278,10 @@ class ResultSchemaTests(unittest.TestCase):
             for metric in SELECTIVE_METRICS
         }
         results = {
-            "demo/resnet/max_softmax/operating_shift": {
+            "demo/resnet/deep_ensemble/operating_shift": {
                 "dataset": "demo",
                 "backbone": "resnet",
-                "method": "max_softmax",
+                "method": "deep_ensemble",
                 "config": "operating_shift",
                 "metrics": metrics,
             }
@@ -182,7 +289,7 @@ class ResultSchemaTests(unittest.TestCase):
         groups = group_plot_results(results, SELECTIVE_METRICS)
         key = ("demo", "resnet", "operating_shift")
         self.assertIn(key, groups)
-        self.assertIn("Max Softmax", groups[key])
+        self.assertIn("DE", groups[key])
 
 
     def test_cov_at_5_risk_returns_largest_admissible_coverage(self) -> None:

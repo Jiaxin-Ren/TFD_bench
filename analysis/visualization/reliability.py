@@ -27,6 +27,13 @@ from analysis.visualization.io import (
     save_figure,
 )
 
+from analysis.visualization.style import (
+    ANNOTATION_SIZE,
+    DOUBLE_COLUMN_MM,
+    LINE_WIDTH,
+    SUBMISSION_DPI,
+    figure_size,
+)
 
 def compute_calibration_bins(
     confidences: np.ndarray,
@@ -71,12 +78,13 @@ def compute_calibration_bins(
 def plot_reliability_diagram(
     confidences: np.ndarray,
     correctness: np.ndarray,
-    n_bins: int = 15,
+    n_bins: int = 10,
     title: str = "Reliability Diagram",
     figsize: Tuple[int, int] = (6, 5),
-    color: str = "#3498db",
+    color: str = "#356AC3",
     show_gap: bool = True,
-    show_counts: bool = True,
+    show_counts: bool = False,
+    show_legend: bool = True,
     ax: Optional[plt.Axes] = None,
 ) -> plt.Figure:
     """
@@ -92,79 +100,99 @@ def plot_reliability_diagram(
         color: Bar color
         show_gap: Show calibration gap
         show_counts: Show sample counts
+        show_legend: Show the legend on this axis
         ax: Existing axes (optional)
     
     Returns:
         matplotlib Figure
     """
+    standalone = ax is None
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=figsize)
     else:
         fig = ax.figure
-    
-    # Compute bins
+
     bin_centers, bin_accuracies, bin_confidences, bin_counts = compute_calibration_bins(
         confidences, correctness, n_bins
     )
-    
+
     bin_width = 1.0 / n_bins
-    
-    # Plot bars
-    bars = ax.bar(
-        bin_centers, bin_accuracies, 
-        width=bin_width * 0.8, 
-        color=color, 
-        edgecolor='white',
-        alpha=0.8,
-        label='Accuracy'
+    valid = bin_counts > 0
+    ax.bar(
+        bin_centers[valid],
+        bin_accuracies[valid],
+        width=bin_width * 0.88,
+        color=color,
+        edgecolor="#1F3D68",
+        linewidth=0.8,
+        label="Accuracy",
+        zorder=2,
     )
-    
-    # Plot perfect calibration line
-    ax.plot([0, 1], [0, 1], 'k--', linewidth=1.5, label='Perfect calibration')
-    
-    # Show calibration gap
+
     if show_gap:
-        for i, (confidence, acc) in enumerate(zip(bin_confidences, bin_accuracies)):
-            if bin_counts[i] > 0:
-                gap_color = '#e74c3c' if acc < confidence else '#27ae60'
-                ax.plot([confidence, confidence], [confidence, acc],
-                       color=gap_color, linewidth=2, alpha=0.7)
-    
-    # Show sample counts
+        gap_bottom = np.minimum(bin_accuracies[valid], bin_confidences[valid])
+        gap_height = np.abs(bin_accuracies[valid] - bin_confidences[valid])
+        ax.bar(
+            bin_centers[valid],
+            gap_height,
+            bottom=gap_bottom,
+            width=bin_width * 0.88,
+            facecolor="white",
+            edgecolor="#FF646A",
+            linewidth=1.1,
+            hatch="///",
+            label="Calibration gap",
+            zorder=3,
+        )
+
+    ax.plot(
+        [0, 1], [0, 1], "k--", linewidth=LINE_WIDTH,
+        label="Perfect calibration", zorder=4,
+    )
+
     if show_counts:
-        for i, (center, count) in enumerate(zip(bin_centers, bin_counts)):
+        for center, count in zip(bin_centers, bin_counts):
             if count > 0:
-                ax.text(center, 0.02, f'{int(count)}', 
-                       ha='center', va='bottom', fontsize=7, color='gray')
-    
-    # Compute ECE
+                ax.text(
+                    center, 0.02, f"{int(count)}",
+                    ha="center", va="bottom", fontsize=ANNOTATION_SIZE, color="gray",
+                )
+
     total_samples = np.sum(bin_counts)
-    ece = 0.0
-    for i in range(n_bins):
-        if bin_counts[i] > 0:
-            ece += (
-                bin_counts[i] / total_samples
-                * np.abs(bin_accuracies[i] - bin_confidences[i])
-            )
-    
-    # Labels and title
-    ax.set_xlabel('Confidence', fontsize=11)
-    ax.set_ylabel('Accuracy', fontsize=11)
-    ax.set_title(f'{title}\nECE = {ece:.4f}', fontsize=12)
+    ece = float(
+        np.sum(bin_counts[valid] * np.abs(bin_accuracies[valid] - bin_confidences[valid]))
+        / total_samples
+    ) if total_samples else float("nan")
+
+    ax.text(
+        0.97, 0.04, f"ECE={ece * 100:.2f}%",
+        transform=ax.transAxes,
+        ha="right", va="bottom", fontsize=ANNOTATION_SIZE,
+        bbox={"facecolor": "white", "edgecolor": "#555555", "pad": 2.0},
+        zorder=5,
+    )
+    ax.set_xlabel("Confidence")
+    ax.set_ylabel("Accuracy")
+    ax.set_title(title)
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
-    ax.legend(loc='upper left', fontsize=9)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
+    ax.set_box_aspect(1)
+    ax.set_xticks(np.linspace(0, 1, 6))
+    ax.set_yticks(np.linspace(0, 1, 6))
+    if show_legend:
+        ax.legend(loc="upper left")
+    ax.grid(True, zorder=0)
+
+    if standalone:
+        fig.tight_layout()
     return fig
 
 
 def plot_multi_reliability(
     results_dict: dict,
-    n_bins: int = 15,
+    n_bins: int = 10,
     figsize: Tuple[int, int] = None,
-    ncols: int = 3,
+    ncols: int = 5,
     title: str = "Reliability Diagrams Comparison"
 ) -> plt.Figure:
     """
@@ -181,34 +209,53 @@ def plot_multi_reliability(
     Returns:
         matplotlib Figure
     """
+    if not results_dict:
+        raise ValueError("No calibration predictions were provided.")
     n_methods = len(results_dict)
     ncols = min(ncols, n_methods)
     nrows = (n_methods + ncols - 1) // ncols
-    
+
     if figsize is None:
-        figsize = (4 * ncols, 4 * nrows)
-    
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+        figsize = figure_size(DOUBLE_COLUMN_MM, 125)
+
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=figsize, sharex=True, sharey=True, squeeze=False
+    )
     axes = np.atleast_1d(axes).ravel()
-    
-    colors = plt.cm.tab10(np.linspace(0, 1, 10))
-    
+
     for i, (method_name, (confidences, correctness)) in enumerate(results_dict.items()):
-        if i < len(axes):
-            plot_reliability_diagram(
-                confidences, correctness,
-                n_bins=n_bins,
-                title=method_name,
-                color=colors[i % 10],
-                ax=axes[i]
-            )
-    
-    # Hide unused axes
-    for j in range(i + 1, len(axes)):
-        axes[j].set_visible(False)
-    
-    fig.suptitle(title, fontsize=14, y=1.02)
-    plt.tight_layout()
+        plot_reliability_diagram(
+            confidences, correctness,
+            n_bins=n_bins,
+            title=method_name,
+            color="#356AC3",
+            show_counts=False,
+            show_legend=False,
+            ax=axes[i],
+        )
+        if i // ncols != nrows - 1:
+            axes[i].set_xlabel("")
+        if i % ncols != 0:
+            axes[i].set_ylabel("")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    legend_items = dict(zip(labels, handles))
+    legend_order = ("Accuracy", "Calibration gap", "Perfect calibration")
+    ordered_handles = [legend_items[label] for label in legend_order]
+
+    unused_axes = axes[n_methods:]
+    for unused_ax in unused_axes:
+        unused_ax.set_axis_off()
+    if len(unused_axes):
+        unused_axes[-1].legend(
+            ordered_handles, legend_order, loc="lower right", frameon=False,
+        )
+    else:
+        fig.legend(
+            ordered_handles, legend_order, loc="lower right", frameon=False,
+        )
+
+    fig.tight_layout()
     return fig
 
 
@@ -219,7 +266,7 @@ def generate_reliability_plot(
     *,
     methods: list[str] | None = None,
     config: str = "clean",
-    bins: int = 15,
+    bins: int = 10,
 ) -> plt.Figure:
     runs = discover_prediction_runs(
         results_dir, dataset=dataset, backbone=backbone, methods=methods, config=config
@@ -239,7 +286,7 @@ def generate_reliability_plot(
     return plot_multi_reliability(
         plot_data,
         n_bins=bins,
-        ncols=min(3, len(plot_data)),
+        ncols=min(5, len(plot_data)),
         title=f"{dataset.upper()} / {backbone} / {config} — Reliability",
     )
 
@@ -251,12 +298,12 @@ def main() -> None:
     parser.add_argument("--backbone", default="resnet")
     parser.add_argument("--config", default="clean")
     parser.add_argument("--methods", nargs="*")
-    parser.add_argument("--bins", type=int, default=15)
+    parser.add_argument("--bins", type=int, default=10)
     parser.add_argument(
         "--output",
         default=str(_PROJECT_ROOT / "results" / "figures" / "reliability.png"),
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=SUBMISSION_DPI)
     args = parser.parse_args()
     fig = generate_reliability_plot(
         args.results_dir,

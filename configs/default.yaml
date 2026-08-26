@@ -3,21 +3,20 @@
 
 # Run every selected dataset × method × backbone combination.
 methods:
-  # - max_softmax
-  # - deep_ensemble
-  # - packed_ensemble
-  # - batch_ensemble
-  # - snapshot_ensemble
-  # - checkpoint_ensemble
-  # - variational_bnn
-  # - swag
-  # - sgld
+  - max_softmax
+  - deep_ensemble
+  - packed_ensemble
+  - batch_ensemble
+  - snapshot_ensemble
+  - variational_bnn
+  - swag
+  - sgld
   - sghmc
-  # - edl
-  # - temperature_scaling
-  # - laplace_approx
-  # - mc_dropout
-  # - mc_batch_norm
+  - edl
+  - temperature_scaling
+  - laplace_approx
+  - mc_dropout
+  - mc_batch_norm
 
 # ResNet is supported by all methods. Add transformer, lenet, mlp, lstm, or
 # timesnet only after confirming that a method provides that variant.
@@ -27,6 +26,16 @@ backbones:
 datasets:
   - name: seu
     root: /mnt/d/Data/Machine/SEU
+  - name: pu
+    root: /mnt/d/Data/Machine/PU
+  - name: cwru
+    root: /mnt/d/Data/Machine/CWRU
+  - name: wt
+    root: /mnt/d/Data/Machine/WT
+  - name: xjtu
+    root: /mnt/d/Data/Machine/XJTU
+  - name: hit
+    root: /mnt/d/Data/Machine/HIT
   # - name: mgb
   #   root: /mnt/d/Data/Machine/MGB
 
@@ -34,7 +43,7 @@ training:
   epochs: 50
   batch_size: 128
   learning_rate: 0.001
-  seeds: [0, 1, 2, 3, 4]
+  seeds: [0]   #[0, 1, 2, 3, 4]
   n_runs: 5          # Used only when seeds is null
   val_split: 0.2
 

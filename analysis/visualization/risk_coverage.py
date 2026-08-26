@@ -21,6 +21,14 @@ from analysis.visualization.io import (
     save_figure,
 )
 
+from analysis.visualization.style import (
+    DOUBLE_COLUMN_MM,
+    LINE_WIDTH,
+    SEED_LINE_WIDTH,
+    SUBMISSION_DPI,
+    figure_size,
+    method_color,
+)
 
 def _risk_coverage(
     probs: np.ndarray,
@@ -60,29 +68,27 @@ def generate_risk_coverage_plot(
         config=config,
     )
     grid = np.linspace(0.01, 1.0, 200)
-    fig, ax = plt.subplots(figsize=(8.5, 6))
-    colors = plt.cm.tab20(np.linspace(0, 1, len(runs)))
-    for color, (method, seed_runs) in zip(colors, runs.items()):
-        curves, aurcs = [], []
+    fig, ax = plt.subplots(figsize=figure_size(DOUBLE_COLUMN_MM, 105))
+    for method, seed_runs in runs.items():
+        curves = []
         for _, arrays in seed_runs:
-            coverage, risk, aurc = _risk_coverage(
+            coverage, risk, _ = _risk_coverage(
                 primary_probs(arrays, "id"),
                 arrays["id_targets"].astype(int),
                 arrays["id_ood_scores"],
             )
             curve = np.interp(grid, coverage, risk, left=risk[0], right=risk[-1])
             curves.append(curve)
-            aurcs.append(aurc)
-            ax.plot(coverage, risk, color=color, alpha=0.15, linewidth=0.8)
+            ax.plot(coverage, risk, color=method_color(method), alpha=0.15, linewidth=SEED_LINE_WIDTH)
         values = np.asarray(curves)
         mean = values.mean(axis=0)
         ddof = 1 if len(values) > 1 else 0
         std = values.std(axis=0, ddof=ddof)
-        ax.plot(grid, mean, color=color, linewidth=2, label=f"{display_method(method)} ({np.mean(aurcs):.3f})")
-        ax.fill_between(grid, np.maximum(0, mean - std), mean + std, color=color, alpha=0.12)
-    ax.set(xlabel="Coverage", ylabel="Risk", title=f"Risk–Coverage — {dataset}/{backbone}/{config}")
+        ax.plot(grid, mean, color=method_color(method), linewidth=LINE_WIDTH, label=display_method(method))
+        ax.fill_between(grid, np.maximum(0, mean - std), mean + std, color=method_color(method), alpha=0.12)
+    ax.set(xlabel="Coverage", ylabel="Risk")
     ax.grid(alpha=0.3)
-    ax.legend(title="Method (AURC)", fontsize=8, ncol=2)
+    ax.legend(title="Method", ncol=2)
     fig.tight_layout()
     return fig
 
@@ -98,7 +104,7 @@ def main() -> None:
         "--output",
         default=str(_PROJECT_ROOT / "results" / "figures" / "risk_coverage.png"),
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=SUBMISSION_DPI)
     args = parser.parse_args()
     fig = generate_risk_coverage_plot(
         args.results_dir, args.dataset, args.backbone, args.config, args.methods

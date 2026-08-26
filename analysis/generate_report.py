@@ -20,10 +20,7 @@ from analysis.collect_results import (  # noqa: E402
     save_results,
 )
 from analysis.generate_tables import DEFAULT_METRICS, generate_markdown_table  # noqa: E402
-from analysis.visualization.plot_all import (  # noqa: E402
-    CONFORMAL_METHODS,
-    generate_all_plots,
-)
+from analysis.visualization.plot_all import generate_all_plots  # noqa: E402
 
 
 def main() -> int:
@@ -32,7 +29,6 @@ def main() -> int:
         "--results-dir", type=Path, default=PROJECT_ROOT / "results"
     )
     parser.add_argument("--dpi", type=int, default=150)
-    parser.add_argument("--include-conformal", action="store_true")
     parser.add_argument("--skip-table", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
     args = parser.parse_args()
@@ -57,13 +53,11 @@ def main() -> int:
         print(f"Saved: {table_path}")
 
     if not args.skip_plots:
-        excluded = set() if args.include_conformal else set(CONFORMAL_METHODS)
         generate_all_plots(
             summary,
             results_dir / "figures",
             args.dpi,
             results_dir,
-            excluded,
         )
     return 0
 

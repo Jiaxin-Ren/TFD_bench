@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # TFD-Bench modification: adapted for one-dimensional fault-diagnosis benchmarking.
+import hashlib
 import sys, warnings
 
 warnings.filterwarnings('ignore')
@@ -7,15 +8,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-import hashlib
 from itertools import islice
 import numpy as np
 import pandas as pd
 from torch import nn
 from torch.utils.data import DataLoader
+from src.datasets.cache import load_cached_array
 from src.datasets.datamodule import TUDataModule
 from src.datasets.base_dataset import dataset
 from src.datasets.noise import DEFAULT_NOISE_PARAMS as NOISE_PARAMS, NoisyEvaluationMixin
+from src.datasets.utils import (
+    assert_disjoint_temporal_splits,
+    random_pool_test_split,
+    stratified_split,
+)
 from src.datasets.transforms import build_transforms
 from typing import Literal
 
@@ -45,7 +51,7 @@ OOD_LABEL = -1
 
 # OOD 集合降采样：每文件保留的最大窗口数。None 表示不限制。
 # 250 × 4(near) = 1000，与 ID 测试集规模相当。
-OOD_MAX_PER_FILE: int | None = 250
+MAX_OOD_WINDOWS_PER_FILE: int | None = 250
 
 # 数据划分专用种子。与 seed_everything 的全局 RNG 完全解耦，
 # 保证不同 model seed 拿到完全相同的 train / val / test。
@@ -95,30 +101,14 @@ def subsample_uniform(items: list, n_max: int | None) -> list:
     return [items[i] for i in idx]
 
 
-CACHE_DIR = Path.home() / ".cache" / "tfd_seu"
-
-
-def _cache_path(filename: str, dataname: str) -> Path:
-    """缓存名包含源文件 mtime 和处理参数，源文件或参数变了自动失效。"""
-    src = Path(filename)
-    delim = "comma" if dataname == "ball_20_0.csv" else "tab"
-    key = f"{src.resolve()}|{src.stat().st_mtime_ns}|skip16|col1|{delim}"
-    h = hashlib.md5(key.encode()).hexdigest()[:12]
-    return CACHE_DIR / f"{src.stem}_{h}.npy"
-
-
 def load_signal_cached(filename: str, dataname: str) -> np.ndarray:
-    cache = _cache_path(filename, dataname)
-    if cache.exists():
-        return np.load(cache)
-
-    arr = load_signal_csv(filename, dataname).astype(np.float32)
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = cache.with_suffix(".tmp.npy")
-    np.save(tmp, arr)
-    tmp.replace(cache)          # 原子替换，避免多进程写坏
-    return arr
+    delim = "comma" if dataname == "ball_20_0.csv" else "tab"
+    return load_cached_array(
+        filename,
+        "seu",
+        lambda source: load_signal_csv(str(source), dataname),
+        parameters={"skip_rows": 16, "column": 1, "delimiter": delim},
+    )
 
 
 def data_load(filename: str, dataname: str, label: int):
@@ -162,7 +152,8 @@ def build_split_by_time(root: str | Path, file_list, label_list,
     确保 pool 与 test 的窗口在时间上不相邻，避免同段录制导致的泄漏。
     """
     root = Path(root)
-    pool_d, pool_l, test_d, test_l = [], [], [], []
+    pool_d, pool_l, pool_s, pool_i = [], [], [], []
+    test_d, test_l, test_s, test_i = [], [], [], []
 
     for fname, lbl in zip(file_list, label_list):
         path = root / _subdir_for(fname) / fname
@@ -173,27 +164,21 @@ def build_split_by_time(root: str | Path, file_list, label_list,
         pool_l += l[:keep]
         test_d += d[cut:]
         test_l += l[cut:]
+        pool_s += [fname] * keep
+        pool_i += list(range(keep))
+        test_s += [fname] * len(d[cut:])
+        test_i += list(range(cut, len(d)))
 
-    return (pd.DataFrame({"data": pool_d, "label": pool_l}),
-            pd.DataFrame({"data": test_d, "label": test_l}))
-
-
-def stratified_split(df: pd.DataFrame, val_ratio: float, seed: int):
-    """按类别分层切分，使用独立 RNG，不受全局随机状态影响。"""
-    rng = np.random.default_rng(seed)
-    val_positions = []
-    labels = df["label"].to_numpy()
-    for lbl in np.unique(labels):
-        pos = np.flatnonzero(labels == lbl)
-        rng.shuffle(pos)
-        n_val = int(round(len(pos) * val_ratio))
-        val_positions.append(pos[:n_val])
-    val_pos = np.sort(np.concatenate(val_positions))
-    mask = np.zeros(len(df), dtype=bool)
-    mask[val_pos] = True
-    val_df = df.iloc[mask].reset_index(drop=True)
-    train_df = df.iloc[~mask].reset_index(drop=True)
-    return train_df, val_df
+    return (
+        pd.DataFrame({
+            "data": pool_d, "label": pool_l,
+            "source": pool_s, "window_index": pool_i,
+        }),
+        pd.DataFrame({
+            "data": test_d, "label": test_l,
+            "source": test_s, "window_index": test_i,
+        }),
+    )
 
 
 def temporal_val_split(df: pd.DataFrame, val_ratio: float,
@@ -243,7 +228,7 @@ class SEUDataModule(NoisyEvaluationMixin, TUDataModule):
             train_transform: nn.Module | None = None,
             test_transform: nn.Module | None = None,
             ood_transform: nn.Module | None = None,
-            normlize_type: str = "-1-1",
+            normalize_type: str = "-1-1",
             pin_memory: bool = True,
             persistent_workers: bool = True,
             eval_noise: bool = False,
@@ -251,7 +236,8 @@ class SEUDataModule(NoisyEvaluationMixin, TUDataModule):
             split_seed: int = SPLIT_SEED,
             split_mode: Literal["random", "temporal"] = "temporal",
             ood_subset: Literal["all", "near", "far"] = "near",
-            ood_max_per_file: int | None = OOD_MAX_PER_FILE,
+            max_ood_windows_per_file: int | None = MAX_OOD_WINDOWS_PER_FILE,
+            max_shift_windows_per_file: int | None = None,
     ) -> None:
 
         super().__init__(
@@ -270,17 +256,18 @@ class SEUDataModule(NoisyEvaluationMixin, TUDataModule):
         self.eval_shift = eval_shift
         self.eval_noise = eval_noise
         self.noise_configs = noise_configs or [(t, s) for t in NOISE_PARAMS for s in range(1, 6)]
-        self.normlize_type = normlize_type
+        self.normalize_type = normalize_type
         self.split_seed = split_seed
         self.split_mode = split_mode
         self.ood_subset = ood_subset
-        self.ood_max_per_file = ood_max_per_file
+        self.max_ood_windows_per_file = max_ood_windows_per_file
+        self.max_shift_windows_per_file = max_shift_windows_per_file
         self._split_done = False
 
-        self.train_transform = build_transforms("train", normalize=self.normlize_type)
-        self.val_transform = build_transforms("val", normalize=self.normlize_type)
-        self.test_transform = build_transforms("val", normalize=self.normlize_type)
-        self.ood_transform = build_transforms("val", normalize=self.normlize_type)
+        self.train_transform = build_transforms("train", normalize=self.normalize_type)
+        self.val_transform = build_transforms("val", normalize=self.normalize_type)
+        self.test_transform = build_transforms("val", normalize=self.normalize_type)
+        self.ood_transform = build_transforms("val", normalize=self.normalize_type)
 
     # ----------------------------------------------------------------- #
 
@@ -310,13 +297,12 @@ class SEUDataModule(NoisyEvaluationMixin, TUDataModule):
             pool_df, self.test_df = build_split_by_time(
                 root, ID_FILES, ID_LABELS, TEST_RATIO)
             self.train_df, self.val_df = temporal_val_split(pool_df, self.val_split)
+            assert_disjoint_temporal_splits(
+                self.train_df, self.val_df, self.test_df)
         else:
             id_df = build_df_from_files(root, ID_FILES, ID_LABELS)
             # 测试集划分固定为 random_state=42，与 model seed 无关
-            id_df = id_df.sample(frac=1, random_state=42).reset_index(drop=True)
-            test_size = int(len(id_df) * TEST_RATIO)
-            self.test_df = id_df.iloc[:test_size].reset_index(drop=True)
-            pool_df = id_df.iloc[test_size:].reset_index(drop=True)
+            pool_df, self.test_df = random_pool_test_split(id_df, TEST_RATIO)
             self.train_df, self.val_df = stratified_split(
                 pool_df, self.val_split, self.split_seed)
 
@@ -324,9 +310,11 @@ class SEUDataModule(NoisyEvaluationMixin, TUDataModule):
             files = self._ood_file_list()
             self.ood_df = build_df_from_files(
                 root, files, [OOD_LABEL] * len(files),
-                max_per_file=self.ood_max_per_file)
+                max_per_file=self.max_ood_windows_per_file)
         if self.eval_shift:
-            self.shift_df = build_df_from_files(root, SHIFT_FILES, SHIFT_LABELS)
+            self.shift_df = build_df_from_files(
+                root, SHIFT_FILES, SHIFT_LABELS,
+                max_per_file=self.max_shift_windows_per_file)
 
         self._split_done = True
 
@@ -362,7 +350,7 @@ class SEUDataModule(NoisyEvaluationMixin, TUDataModule):
         if self.eval_ood:
             lines.append(f"{'ood':6s} n={len(self.ood_df):5d}  "
                          f"subset={self.ood_subset}  "
-                         f"max_per_file={self.ood_max_per_file}")
+                         f"max_per_file={self.max_ood_windows_per_file}")
         if self.eval_shift:
             lines.append(f"{'shift':6s} n={len(self.shift_df):5d}")
         return "\n".join(lines)
@@ -376,3 +364,29 @@ class SEUDataModule(NoisyEvaluationMixin, TUDataModule):
             dataloaders.append(
                 self._data_loader(self.get_shift_set(), training=False, shuffle=False))
         return dataloaders
+
+
+
+if __name__ == "__main__":
+    import torch
+
+    for mode in ["random", "temporal"]:
+        print(f"\n{'=' * 60}\n  split_mode = {mode}\n{'=' * 60}")
+        fingerprints = []
+        for s in [0, 1, 2]:
+            torch.manual_seed(s)
+            np.random.seed(s)
+            dm = SEUDataModule(root="/mnt/d/Data/Machine/SEU", batch_size=64,
+                               val_split=0.2, eval_ood=True, split_mode=mode)
+            dm.setup("test")
+            print(f"\n--- global seed {s} ---")
+            print(dm.split_summary())
+            fp = hashlib.md5(
+                str(dm.val_df["label"].tolist()
+                    + [float(a.sum()) for a in dm.val_df["data"]]).encode()
+            ).hexdigest()[:12]
+            fingerprints.append(fp)
+            print("val fingerprint:", fp)
+
+        print("\n划分是否稳定:",
+              "是" if len(set(fingerprints)) == 1 else "否 —— 仍受全局随机状态影响")

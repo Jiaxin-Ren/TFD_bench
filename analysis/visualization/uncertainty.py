@@ -24,9 +24,17 @@ from analysis.visualization.io import (
     discover_prediction_runs,
     display_method,
     finite_ood_score_pair,
+    native_ood_scores,
     save_figure,
 )
 
+from analysis.visualization.style import (
+    ANNOTATION_SIZE,
+    DOUBLE_COLUMN_MM,
+    LINE_WIDTH,
+    SUBMISSION_DPI,
+    figure_size,
+)
 
 def plot_uncertainty_distribution(
     id_scores: np.ndarray,
@@ -65,6 +73,7 @@ def plot_uncertainty_distribution(
     Returns:
         matplotlib Figure
     """
+    standalone = ax is None
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=figsize)
     else:
@@ -89,25 +98,27 @@ def plot_uncertainty_distribution(
             label=ood_label_full, density=True, edgecolor='white')
     
     # Add vertical lines for means
-    ax.axvline(id_mean, color=id_color, linestyle='--', linewidth=2, alpha=0.8)
-    ax.axvline(ood_mean, color=ood_color, linestyle='--', linewidth=2, alpha=0.8)
+    ax.axvline(id_mean, color=id_color, linestyle='--', linewidth=LINE_WIDTH, alpha=0.8)
+    ax.axvline(ood_mean, color=ood_color, linestyle='--', linewidth=LINE_WIDTH, alpha=0.8)
     
     # Labels
-    ax.set_xlabel(xlabel, fontsize=11)
-    ax.set_ylabel("Density", fontsize=11)
-    ax.set_title(title, fontsize=12)
-    ax.legend(loc='upper right', fontsize=9)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Density")
+    ax.set_title(title)
+    ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    if standalone:
+        fig.tight_layout()
     return fig
 
 
 def plot_multi_uncertainty_comparison(
     results_dict: Dict[str, Tuple[np.ndarray, np.ndarray]],
     figsize: Tuple[int, int] = None,
-    ncols: int = 2,
-    title: str = "Uncertainty Distributions by Method"
+    ncols: int = 5,
+    title: str = "Uncertainty Distributions by Method",
+    group_labels: Tuple[str, str] = ("In-Distribution", "Out-of-Distribution"),
 ) -> plt.Figure:
     """
     Plot uncertainty distributions for multiple methods.
@@ -123,11 +134,13 @@ def plot_multi_uncertainty_comparison(
         matplotlib Figure
     """
     n_methods = len(results_dict)
-    ncols = min(ncols, n_methods)
-    nrows = (n_methods + ncols - 1) // ncols
+    if n_methods > 14:
+        raise ValueError("The benchmark OOD-score layout supports at most 14 methods.")
+    ncols = 5
+    nrows = 3
     
     if figsize is None:
-        figsize = (6 * ncols, 4 * nrows)
+        figsize = figure_size(DOUBLE_COLUMN_MM, 125)
     
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
     axes = np.atleast_1d(axes).ravel()
@@ -137,15 +150,39 @@ def plot_multi_uncertainty_comparison(
             plot_uncertainty_distribution(
                 id_scores, ood_scores,
                 title=method_name,
-                ax=axes[i]
+                id_label=group_labels[0],
+                ood_label=group_labels[1],
+                show_stats=False,
+                ax=axes[i],
+            )
+            if i // ncols != nrows - 1:
+                axes[i].set_xlabel("")
+            if i % ncols != 0:
+                axes[i].set_ylabel("")
+            axes[i].text(
+                0.97,
+                0.95,
+                f"ID: μ={np.mean(id_scores):.3f}, σ={np.std(id_scores):.3f}\n"
+                f"OOD: μ={np.mean(ood_scores):.3f}, σ={np.std(ood_scores):.3f}",
+                transform=axes[i].transAxes,
+                ha="right", va="top", fontsize=ANNOTATION_SIZE,
+                bbox={"facecolor": "white", "edgecolor": "#cccccc", "alpha": 0.9},
             )
     
-    # Hide unused axes
-    for j in range(i + 1, len(axes)):
-        axes[j].set_visible(False)
-    
-    fig.suptitle(title, fontsize=14, y=1.02)
-    plt.tight_layout()
+    handles, labels = axes[0].get_legend_handles_labels()
+    for method_ax in axes[:n_methods]:
+        legend = method_ax.get_legend()
+        if legend is not None:
+            legend.remove()
+    unused_axes = axes[n_methods:]
+    for unused_ax in unused_axes:
+        unused_ax.set_axis_off()
+    unused_axes[-1].legend(
+        handles, labels, loc="lower right", frameon=False,
+    )
+
+    fig.subplots_adjust(
+        left=0.065, right=0.99, bottom=0.09, top=0.97, wspace=0.30, hspace=0.38)
     return fig
 
 
@@ -203,11 +240,10 @@ def plot_violin_comparison(
     # Set x-axis ticks
     tick_positions = [i * 3 + 0.5 for i in range(len(methods))]
     ax.set_xticks(tick_positions)
-    ax.set_xticklabels(methods, fontsize=10)
+    ax.set_xticklabels(methods)
     
     # Labels
-    ax.set_ylabel("Uncertainty Score", fontsize=11)
-    ax.set_title(title, fontsize=12)
+    ax.set_ylabel("Uncertainty Score")
     ax.grid(True, alpha=0.3, axis='y')
     
     # Legend
@@ -234,20 +270,46 @@ def generate_uncertainty_plot(
         results_dir, dataset=dataset, backbone=backbone, methods=methods, config=config
     )
     plot_data = {}
-    for method, method_runs in runs.items():
-        pairs = [finite_ood_score_pair(arrays) for _, arrays in method_runs]
-        id_scores = [pair[0] for pair in pairs if pair[0].size]
-        ood_scores = [pair[1] for pair in pairs if pair[1].size]
-        if id_scores and ood_scores:
-            plot_data[display_method(method)] = (
-                np.concatenate(id_scores), np.concatenate(ood_scores)
-            )
+    group_labels = ("In-Distribution", "Out-of-Distribution")
+    if config == "operating_shift":
+        clean_runs = discover_prediction_runs(
+            results_dir, dataset=dataset, backbone=backbone, methods=methods, config="clean"
+        )
+        for method, shift_method_runs in runs.items():
+            clean_by_seed = dict(clean_runs.get(method, []))
+            clean_scores, shift_scores = [], []
+            for seed, shift_arrays in shift_method_runs:
+                clean_arrays = clean_by_seed.get(seed)
+                if clean_arrays is None:
+                    continue
+                clean = native_ood_scores(clean_arrays, "id")
+                shifted = native_ood_scores(shift_arrays, "id")
+                clean = clean[np.isfinite(clean)]
+                shifted = shifted[np.isfinite(shifted)]
+                if clean.size and shifted.size:
+                    clean_scores.append(clean)
+                    shift_scores.append(shifted)
+            if clean_scores and shift_scores:
+                plot_data[display_method(method)] = (
+                    np.concatenate(clean_scores), np.concatenate(shift_scores)
+                )
+        group_labels = ("Clean ID", "Operating shift")
+    else:
+        for method, method_runs in runs.items():
+            pairs = [finite_ood_score_pair(arrays) for _, arrays in method_runs]
+            id_scores = [pair[0] for pair in pairs if pair[0].size]
+            ood_scores = [pair[1] for pair in pairs if pair[1].size]
+            if id_scores and ood_scores:
+                plot_data[display_method(method)] = (
+                    np.concatenate(id_scores), np.concatenate(ood_scores)
+                )
     if not plot_data:
         raise ValueError("No finite ID/OOD scores are available for plotting.")
     return plot_multi_uncertainty_comparison(
         plot_data,
-        ncols=min(3, len(plot_data)),
+        ncols=5,
         title=f"{dataset.upper()} / {backbone} / {config} — Native OOD Scores",
+        group_labels=group_labels,
     )
 
 
@@ -262,7 +324,7 @@ def main() -> None:
         "--output",
         default=str(_PROJECT_ROOT / "results" / "figures" / "ood_scores.png"),
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=SUBMISSION_DPI)
     args = parser.parse_args()
     fig = generate_uncertainty_plot(
         args.results_dir,

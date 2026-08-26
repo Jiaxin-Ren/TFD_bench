@@ -120,6 +120,38 @@ def add_common_args(parser: argparse.ArgumentParser, config_path: str = None) ->
     parser.add_argument("--epochs", type=int, 
                         default=training_cfg.get("epochs", 30), 
                         help="Number of epochs / 训练轮数")
+    parser.add_argument(
+        "--max-id-windows-per-file",
+        type=int,
+        default=dataset_cfg.get("max_id_windows_per_file"),
+        help="Deterministic per-file cap applied before ID splitting.",
+    )
+    parser.add_argument(
+        "--max-ood-windows-per-file",
+        type=int,
+        default=dataset_cfg.get("max_ood_windows_per_file"),
+        help="Deterministic per-file cap for OOD evaluation.",
+    )
+    parser.add_argument(
+        "--max-shift-windows-per-file",
+        type=int,
+        default=dataset_cfg.get("max_shift_windows_per_file"),
+        help="Deterministic per-file cap for operating-shift evaluation.",
+    )
+    parser.add_argument(
+        "--split-mode",
+        type=str,
+        default=dataset_cfg.get("split_mode"),
+        choices=["random", "temporal"],
+        help="ID train/val/test split strategy (defaults to the dataset's own default).",
+    )
+    parser.add_argument(
+        "--ood-subset",
+        type=str,
+        default=dataset_cfg.get("ood_subset"),
+        choices=["all", "near", "far"],
+        help="Which OOD fault subset to evaluate (defaults to the dataset's own default).",
+    )
     parser.add_argument("--batch-size", "--batch_size", dest="batch_size", type=int,
                         default=training_cfg.get("batch_size", 48), 
                         help="Batch size / 批次大小")
@@ -181,6 +213,21 @@ def get_datamodule(args: argparse.Namespace, **kwargs):
         DataModule instance
     """
     dataset_name = getattr(args, 'dataset', 'seu').lower()
+    # All datasets accept max_id/ood_windows_per_file, split_mode and ood_subset.
+    # thu is the only dataset without shift-evaluation support, so it alone
+    # does not accept max_shift_windows_per_file.
+    forwarded_options = [
+        "max_id_windows_per_file",
+        "max_ood_windows_per_file",
+        "split_mode",
+        "ood_subset",
+    ]
+    if dataset_name != "thu":
+        forwarded_options.append("max_shift_windows_per_file")
+    for option in forwarded_options:
+        value = getattr(args, option, None)
+        if value is not None:
+            kwargs.setdefault(option, value)
     # Get data root
     root = Path(args.data_root)
     

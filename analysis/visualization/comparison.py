@@ -25,6 +25,14 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from analysis.visualization.io import display_method, load_summary_group, save_figure
 
+from analysis.visualization.style import (
+    DOUBLE_COLUMN_MM,
+    LINE_WIDTH,
+    SINGLE_COLUMN_MM,
+    SUBMISSION_DPI,
+    figure_size,
+    method_color,
+)
 
 SUMMARY_METRICS = {
     "test/cls/Acc": ("ACC", True),
@@ -65,7 +73,7 @@ def plot_metric_comparison(
     n_metrics = len(metrics)
     
     if figsize is None:
-        figsize = (max(8, n_methods * 1.5), 5)
+        figsize = figure_size(DOUBLE_COLUMN_MM, 80)
     
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     
@@ -103,12 +111,11 @@ def plot_metric_comparison(
                     bar.set_linewidth(2)
     
     # Labels
-    ax.set_xlabel('Method', fontsize=11)
-    ax.set_ylabel('Value', fontsize=11)
-    ax.set_title(title, fontsize=12)
+    ax.set_xlabel('Method')
+    ax.set_ylabel('Value')
     ax.set_xticks(x)
-    ax.set_xticklabels(methods, rotation=45, ha='right', fontsize=9)
-    ax.legend(loc='upper right', fontsize=8)
+    ax.set_xticklabels(methods, rotation=45, ha='right')
+    ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3, axis='y')
     
     plt.tight_layout()
@@ -148,7 +155,7 @@ def plot_metric_heatmap(
     n_metrics = len(metrics)
     
     if figsize is None:
-        figsize = (max(6, n_metrics * 1.2), max(4, n_methods * 0.5))
+        figsize = figure_size(DOUBLE_COLUMN_MM, 100)
     
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     
@@ -185,18 +192,17 @@ def plot_metric_heatmap(
                 val = data[i, j]
                 text_color = 'white' if data_normalized[i, j] < 0.3 or data_normalized[i, j] > 0.7 else 'black'
                 ax.text(j, i, f'{val:.3f}', ha='center', va='center', 
-                       color=text_color, fontsize=8)
+                       color=text_color)
     
     # Labels
     ax.set_xticks(np.arange(n_metrics))
     ax.set_yticks(np.arange(n_methods))
-    ax.set_xticklabels(metrics, rotation=45, ha='right', fontsize=9)
-    ax.set_yticklabels(methods, fontsize=9)
-    ax.set_title(title, fontsize=12)
+    ax.set_xticklabels(metrics, rotation=45, ha='right')
+    ax.set_yticklabels(methods)
     
     # Colorbar
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label('Relative Performance (higher = better)', fontsize=9)
+    cbar.set_label('Relative Performance (higher = better)')
     
     plt.tight_layout()
     return fig
@@ -206,7 +212,7 @@ def plot_radar_chart(
     results_dict: Dict[str, Dict[str, float]],
     metrics: List[str] = None,
     title: str = "Method Comparison (Radar)",
-    figsize: Tuple[int, int] = (8, 8),
+    figsize: Tuple[int, int] = None,
 ) -> plt.Figure:
     """
     Plot radar chart comparing methods.
@@ -231,6 +237,8 @@ def plot_radar_chart(
     angles = np.linspace(0, 2 * np.pi, n_metrics, endpoint=False).tolist()
     angles += angles[:1]  # Close the loop
     
+    if figsize is None:
+        figsize = figure_size(SINGLE_COLUMN_MM, SINGLE_COLUMN_MM)
     fig, ax = plt.subplots(1, 1, figsize=figsize, subplot_kw=dict(polar=True))
     
     colors = plt.cm.tab10(np.linspace(0, 1, len(methods)))
@@ -243,14 +251,13 @@ def plot_radar_chart(
         values = data_normalized[i].tolist()
         values += values[:1]  # Close the loop
         
-        ax.plot(angles, values, 'o-', linewidth=2, color=colors[i], label=method)
-        ax.fill(angles, values, alpha=0.1, color=colors[i])
+        ax.plot(angles, values, 'o-', linewidth=LINE_WIDTH, color=method_color(method), label=method)
+        ax.fill(angles, values, alpha=0.1, color=method_color(method))
     
     # Labels
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(metrics, fontsize=9)
-    ax.set_title(title, fontsize=12, y=1.1)
-    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=9)
+    ax.set_xticklabels(metrics)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
     
     plt.tight_layout()
     return fig
@@ -272,10 +279,10 @@ def generate_comparison_plot(
             f"No summary records for {dataset}/{backbone}/{config} in {summary}"
         )
 
-    method_names = sorted(records)
+    method_names = list(records)
     y = np.arange(len(method_names))
     fig, axes = plt.subplots(
-        1, 3, figsize=(15, max(5, 0.42 * len(method_names))), sharey=True
+        1, 3, figsize=figure_size(DOUBLE_COLUMN_MM, 100), sharey=True
     )
     for ax, (metric, (label, higher_better)) in zip(axes, SUMMARY_METRICS.items()):
         means = np.asarray([
@@ -295,7 +302,6 @@ def generate_comparison_plot(
         ax.invert_yaxis()
     axes[0].set_yticks(y)
     axes[0].set_yticklabels([display_method(name) for name in method_names])
-    fig.suptitle(f"{dataset} / {backbone} / {config}")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
 
@@ -311,7 +317,7 @@ def main() -> None:
         "--output",
         default=str(_PROJECT_ROOT / "results" / "figures" / "comparison.png"),
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=SUBMISSION_DPI)
     args = parser.parse_args()
     fig = generate_comparison_plot(
         args.summary, args.dataset, args.backbone, args.config, args.methods

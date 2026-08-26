@@ -22,9 +22,15 @@ from analysis.visualization.io import (
     primary_probs,
     save_figure,
 )
+from analysis.visualization.style import (
+    DOUBLE_COLUMN_MM,
+    SUBMISSION_DPI,
+    figure_size,
+)
 
 
-def _ece(probs: np.ndarray, targets: np.ndarray, bins: int = 15) -> float:
+
+def _ece(probs: np.ndarray, targets: np.ndarray, bins: int = 10) -> float:
     confidence = probs.max(axis=1)
     correct = probs.argmax(axis=1) == targets
     edges = np.linspace(0, 1, bins + 1)
@@ -60,9 +66,11 @@ def generate_seed_stability_plot(
     runs = discover_prediction_runs(
         results_dir, dataset=dataset, backbone=backbone, methods=methods, config=config
     )
-    method_names = sorted(runs)
+    method_names = list(runs)
     y = np.arange(len(method_names))
-    fig, axes = plt.subplots(1, 3, figsize=(15, max(5, len(method_names) * 0.43)), sharey=True)
+    fig, axes = plt.subplots(
+        1, 3, figsize=figure_size(DOUBLE_COLUMN_MM, 100), sharey=True
+    )
     for method_index, method in enumerate(method_names):
         values = np.asarray([_run_metrics(arrays) for _, arrays in runs[method]]) * 100
         for metric_index, ax in enumerate(axes):
@@ -74,7 +82,6 @@ def generate_seed_stability_plot(
         ax.grid(axis="x", alpha=0.3)
         ax.invert_yaxis()
     axes[0].set_yticklabels([display_method(name) for name in method_names])
-    fig.suptitle(f"Seed Stability — {dataset}/{backbone}/{config}")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
 
@@ -90,7 +97,7 @@ def main() -> None:
         "--output",
         default=str(_PROJECT_ROOT / "results" / "figures" / "seed_stability.png"),
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=SUBMISSION_DPI)
     args = parser.parse_args()
     fig = generate_seed_stability_plot(args.results_dir, args.dataset, args.backbone, args.config, args.methods)
     save_figure(fig, args.output, args.dpi)

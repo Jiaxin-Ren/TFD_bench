@@ -11,10 +11,8 @@ from typing import Iterable
 import numpy as np
 
 
-def display_method(name: str) -> str:
-    """Return the human-readable method name without requiring table modules."""
-    return name.replace("_", " ").title().replace("Edl", "EDL").replace("Mc ", "MC ")
-
+from analysis.methods import PLOT_METHODS, display_method, plot_method_sort_key
+from analysis.visualization.style import SUBMISSION_DPI
 
 def parse_seed(path: Path) -> int:
     match = re.fullmatch(r"seed(\d+)", path.parents[1].name)
@@ -38,6 +36,8 @@ def discover_prediction_runs(
 
     for path in sorted(root.glob("*/seed*/predictions/*.npz")):
         method = path.parents[2].name
+        if method not in PLOT_METHODS:
+            continue
         if selected and method not in selected:
             continue
         artifact_config = path.stem
@@ -68,7 +68,7 @@ def discover_prediction_runs(
             f"No prediction artifacts for {dataset}/{backbone}/{config}. "
             "Rerun the experiments with the current code first."
         )
-    return dict(grouped)
+    return dict(sorted(grouped.items(), key=lambda item: plot_method_sort_key(item[0])))
 
 
 def load_summary_group(
@@ -86,6 +86,8 @@ def load_summary_group(
     group = {}
     for stats in summary.values():
         method = stats.get("method", "unknown")
+        if method not in PLOT_METHODS:
+            continue
         if (
             stats.get("dataset") == dataset
             and stats.get("backbone") == backbone
@@ -95,7 +97,7 @@ def load_summary_group(
             group[method] = stats.get("metrics", {})
     if not group:
         raise ValueError(f"No summary records for {dataset}/{backbone}/{config}.")
-    return group
+    return dict(sorted(group.items(), key=lambda item: plot_method_sort_key(item[0])))
 
 
 def primary_probs(arrays: dict[str, np.ndarray], split: str = "id") -> np.ndarray:
@@ -133,8 +135,8 @@ def finite_ood_score_pair(
     return id_scores[np.isfinite(id_scores)], ood_scores[np.isfinite(ood_scores)]
 
 
-def save_figure(fig, output: str | Path, dpi: int = 300) -> Path:
+def save_figure(fig, output: str | Path, dpi: int = SUBMISSION_DPI) -> Path:
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    fig.savefig(path, dpi=dpi)
     return path

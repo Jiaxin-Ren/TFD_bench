@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional, Tuple, Dict
-from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+from sklearn.metrics import precision_recall_curve, roc_curve
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT))
@@ -28,6 +28,14 @@ from analysis.visualization.io import (
     save_figure,
 )
 
+from analysis.visualization.style import (
+    DOUBLE_COLUMN_MM,
+    LINE_WIDTH,
+    SEED_LINE_WIDTH,
+    SUBMISSION_DPI,
+    figure_size,
+    method_color,
+)
 
 def plot_roc_curves(
     results_dict: Dict[str, Tuple[np.ndarray, np.ndarray]],
@@ -55,23 +63,19 @@ def plot_roc_curves(
     else:
         fig = ax.figure
     
-    colors = plt.cm.tab10(np.linspace(0, 1, 10))
-    
-    for i, (method_name, (labels, scores)) in enumerate(results_dict.items()):
+    for method_name, (labels, scores) in results_dict.items():
         fpr, tpr, _ = roc_curve(labels, scores)
-        roc_auc = auc(fpr, tpr)
         
-        ax.plot(fpr, tpr, color=colors[i % 10], linewidth=2,
-                label=f'{method_name} (AUC = {roc_auc:.4f})')
+        ax.plot(fpr, tpr, color=method_color(method_name), linewidth=LINE_WIDTH,
+                label=method_name)
     
     # Random baseline
-    ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random (AUC = 0.5)')
+    ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random')
     
     # Labels
-    ax.set_xlabel('False Positive Rate', fontsize=11)
-    ax.set_ylabel('True Positive Rate', fontsize=11)
-    ax.set_title(title, fontsize=12)
-    ax.legend(loc='lower right', fontsize=9)
+    ax.set_xlabel('False Positive Rate')
+    ax.set_ylabel('True Positive Rate')
+    ax.legend(loc='lower right')
     ax.grid(True, alpha=0.3)
     ax.set_xlim([0, 1])
     ax.set_ylim([0, 1])
@@ -104,20 +108,16 @@ def plot_pr_curves(
     else:
         fig = ax.figure
     
-    colors = plt.cm.tab10(np.linspace(0, 1, 10))
-    
-    for i, (method_name, (labels, scores)) in enumerate(results_dict.items()):
+    for method_name, (labels, scores) in results_dict.items():
         precision, recall, _ = precision_recall_curve(labels, scores)
-        ap = average_precision_score(labels, scores)
         
-        ax.plot(recall, precision, color=colors[i % 10], linewidth=2,
-                label=f'{method_name} (AP = {ap:.4f})')
+        ax.plot(recall, precision, color=method_color(method_name), linewidth=LINE_WIDTH,
+                label=method_name)
     
     # Labels
-    ax.set_xlabel('Recall', fontsize=11)
-    ax.set_ylabel('Precision', fontsize=11)
-    ax.set_title(title, fontsize=12)
-    ax.legend(loc='lower left', fontsize=9)
+    ax.set_xlabel('Recall')
+    ax.set_ylabel('Precision')
+    ax.legend(loc='lower left')
     ax.grid(True, alpha=0.3)
     ax.set_xlim([0, 1])
     ax.set_ylim([0, 1])
@@ -148,7 +148,6 @@ def plot_roc_and_pr(
     plot_roc_curves(results_dict, title="ROC Curves", ax=ax1)
     plot_pr_curves(results_dict, title="Precision-Recall Curves", ax=ax2)
     
-    fig.suptitle(title, fontsize=14, y=1.02)
     plt.tight_layout()
     return fig
 
@@ -185,13 +184,14 @@ def compute_fpr_at_tpr(labels: np.ndarray, scores: np.ndarray, target_tpr: float
 
 def plot_roc_pr_runs(runs: dict, title: str) -> plt.Figure:
     """Plot seed-wise curves with the mean and one-standard-deviation band."""
-    fig, (roc_ax, pr_ax) = plt.subplots(1, 2, figsize=(14, 5.5))
+    fig, (roc_ax, pr_ax) = plt.subplots(
+        1, 2, figsize=figure_size(DOUBLE_COLUMN_MM, 78)
+    )
     roc_grid = np.linspace(0, 1, 301)
     recall_grid = np.linspace(0, 1, 301)
-    colors = plt.cm.tab20(np.linspace(0, 1, max(len(runs), 1)))
 
-    for color, (method, method_runs) in zip(colors, sorted(runs.items())):
-        tprs, precisions, aucs, aps, fpr95s = [], [], [], [], []
+    for method, method_runs in runs.items():
+        tprs, precisions = [], []
         skipped_seeds = []
         for seed, arrays in method_runs:
             id_scores, ood_scores = finite_ood_score_pair(arrays)
@@ -202,13 +202,10 @@ def plot_roc_pr_runs(runs: dict, title: str) -> plt.Figure:
             scores = np.r_[id_scores, ood_scores]
             fpr, tpr, _ = roc_curve(labels, scores)
             precision, recall, _ = precision_recall_curve(labels, scores)
-            roc_ax.plot(fpr, tpr, color=color, linewidth=0.7, alpha=0.22)
-            pr_ax.plot(recall, precision, color=color, linewidth=0.7, alpha=0.22)
+            roc_ax.plot(fpr, tpr, color=method_color(method), linewidth=SEED_LINE_WIDTH, alpha=0.22)
+            pr_ax.plot(recall, precision, color=method_color(method), linewidth=SEED_LINE_WIDTH, alpha=0.22)
             tprs.append(np.interp(roc_grid, fpr, tpr))
             precisions.append(np.interp(recall_grid, recall[::-1], precision[::-1]))
-            aucs.append(auc(fpr, tpr))
-            aps.append(average_precision_score(labels, scores))
-            fpr95s.append(compute_fpr_at_tpr(labels, scores))
 
         if skipped_seeds:
             print(f"Skipped {method} ROC seeds with no finite ID/OOD scores: {skipped_seeds}")
@@ -220,30 +217,27 @@ def plot_roc_pr_runs(runs: dict, title: str) -> plt.Figure:
         precisions = np.asarray(precisions)
         roc_mean, roc_std = tprs.mean(axis=0), tprs.std(axis=0)
         pr_mean, pr_std = precisions.mean(axis=0), precisions.std(axis=0)
-        label = (
-            f"{display_method(method)} "
-            f"(AUROC={np.mean(aucs):.3f}, FPR95={np.mean(fpr95s):.3f})"
-        )
-        roc_ax.plot(roc_grid, roc_mean, color=color, linewidth=2, label=label)
+        label = display_method(method)
+        roc_ax.plot(roc_grid, roc_mean, color=method_color(method), linewidth=LINE_WIDTH, label=label)
         roc_ax.fill_between(
             roc_grid,
             np.clip(roc_mean - roc_std, 0, 1),
             np.clip(roc_mean + roc_std, 0, 1),
-            color=color,
+            color=method_color(method),
             alpha=0.12,
         )
         pr_ax.plot(
             recall_grid,
             pr_mean,
-            color=color,
-            linewidth=2,
-            label=f"{display_method(method)} (AUPR={np.mean(aps):.3f})",
+            color=method_color(method),
+            linewidth=LINE_WIDTH,
+            label=display_method(method),
         )
         pr_ax.fill_between(
             recall_grid,
             np.clip(pr_mean - pr_std, 0, 1),
             np.clip(pr_mean + pr_std, 0, 1),
-            color=color,
+            color=method_color(method),
             alpha=0.12,
         )
 
@@ -252,10 +246,9 @@ def plot_roc_pr_runs(runs: dict, title: str) -> plt.Figure:
         (roc_ax, "False Positive Rate", "True Positive Rate", "ROC"),
         (pr_ax, "Recall", "Precision", "Precision–Recall"),
     ):
-        ax.set(xlim=(0, 1), ylim=(0, 1), xlabel=x_label, ylabel=y_label, title=panel)
+        ax.set(xlim=(0, 1), ylim=(0, 1), xlabel=x_label, ylabel=y_label)
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8, loc="best")
-    fig.suptitle(title)
+        ax.legend(loc="best")
     fig.tight_layout()
     return fig
 
@@ -287,7 +280,7 @@ def main() -> None:
         "--output",
         default=str(_PROJECT_ROOT / "results" / "figures" / "roc_pr.png"),
     )
-    parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--dpi", type=int, default=SUBMISSION_DPI)
     args = parser.parse_args()
     fig = generate_roc_plot(
         args.results_dir,

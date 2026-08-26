@@ -84,7 +84,7 @@ class ClassificationRoutine(LightningModule):
         ood_criterion: TUOODCriterion | str = "msp",
         post_processing: PostProcessing | None = None,
         log_post_processing: bool = True,
-        num_bins_cal_err: int = 15,
+        num_bins_cal_err: int = 10,
         save_in_csv: bool = False,
         collect_predictions: bool = False,
         csv_filename: str = "results.csv",
