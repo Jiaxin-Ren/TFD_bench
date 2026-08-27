@@ -33,7 +33,12 @@ from analysis.visualization.style import (
     figure_size,
     method_color,
 )
-from analysis.visualization.comparison import plot_metric_heatmap
+from analysis.visualization.cross_dataset_heatmap import (
+    generate_cross_dataset_heatmap,
+)
+from analysis.visualization.cross_dataset_profile import (
+    generate_cross_dataset_profile,
+)
 from analysis.visualization.reliability import generate_reliability_plot
 from analysis.visualization.risk_coverage import generate_risk_coverage_plot
 from analysis.visualization.roc import generate_roc_plot
@@ -47,11 +52,13 @@ PLOT_METRICS = {
     "ood/AUROC": {"label": "AUROC", "scale": 100, "higher_better": True, "unit": "Percent (%)"},
 }
 
-SELECTIVE_METRICS = {
-    "test/sc/AURC": {"label": "AURC", "scale": 1, "higher_better": False, "unit": "Score"},
-    "test/sc/AUGRC": {"label": "AUGRC", "scale": 1, "higher_better": False, "unit": "Score"},
-    "test/sc/Cov@5Risk": {"label": "Cov@5%Risk", "scale": 100, "higher_better": True, "unit": "Percent (%)"},
-    "test/sc/Risk@80Cov": {"label": "Risk@80%Cov", "scale": 1, "higher_better": False, "unit": "Score"},
+SELECTIVE_METRIC = {
+    "test/sc/AURC": {
+        "label": "AURC",
+        "scale": 100,
+        "higher_better": False,
+        "unit": "Percent (%)",
+    },
 }
 
 
@@ -200,26 +207,48 @@ def _plot_noise_trends(
     count = 0
     for (dataset, backbone), noise_types in sorted(by_benchmark.items()):
         for noise, methods in sorted(noise_types.items()):
-            fig, axes = plt.subplots(1, len(metric_definitions), figsize=figure_size(DOUBLE_COLUMN_MM, 75), sharex=True)
+            fig, axes = plt.subplots(
+                1,
+                len(metric_definitions) + 1,
+                figsize=figure_size(DOUBLE_COLUMN_MM, 68),
+                sharex=True,
+            )
+            metric_axes = axes[:-1]
+            legend_ax = axes[-1]
             for method in sorted(methods, key=method_display_sort_key):
                 severities = dict(methods[method])
                 color = method_color(next((raw for raw, short in METHOD_NAMES.items() if short == method), method))
                 if method in clean[(dataset, backbone)]:
                     severities[0] = clean[(dataset, backbone)][method]
                 x = np.asarray(sorted(severities))
-                for ax, metric_config in zip(axes, metric_definitions.values()):
+                for ax, metric_config in zip(metric_axes, metric_definitions.values()):
                     label = metric_config["label"]
                     means = np.asarray([severities[s][label]["mean"] for s in x])
                     stds = np.asarray([severities[s][label]["std"] for s in x])
                     ax.plot(x, means, marker="o", linewidth=LINE_WIDTH, color=color, label=method)
                     ax.fill_between(x, means - stds, means + stds, color=color, alpha=0.08)
-            for ax, metric_config in zip(axes, metric_definitions.values()):
+            for metric_index, (ax, metric_config) in enumerate(
+                zip(metric_axes, metric_definitions.values())
+            ):
                 direction = "↑" if metric_config["higher_better"] else "↓"
-                ax.set(title=f"{metric_config['label']} {direction}", xlabel="Severity (0 = clean)", ylabel=metric_config["unit"])
+                ax.set(
+                    title=f"{metric_config['label']} {direction}",
+                    xlabel="Noise severity",
+                    ylabel=metric_config["unit"] if metric_index == 0 else "",
+                )
+                ax.yaxis.labelpad = 2
                 ax.set_xticks(range(6))
                 ax.grid(True, alpha=0.3)
-            axes[-1].legend(bbox_to_anchor=(1.02, 1), loc="upper left")
-            fig.tight_layout(rect=(0, 0, 0.9, 1))
+            handles, labels = metric_axes[0].get_legend_handles_labels()
+            legend_ax.set_axis_off()
+            legend_ax.legend(handles, labels, loc="center", frameon=False)
+            fig.subplots_adjust(
+                left=0.055,
+                right=0.995,
+                bottom=0.18,
+                top=0.92,
+                wspace=0.32,
+            )
             path = output_dir / _safe_name(dataset) / _safe_name(backbone) / f"noise_{_safe_name(noise)}{suffix}.png"
             _save_figure(fig, path, dpi)
             count += 1
@@ -241,63 +270,32 @@ def generate_all_plots(
     }
     output_path = Path(output_dir)
     groups = _group_results(results)
-    selective_groups = _group_results(results, SELECTIVE_METRICS)
+    selective_groups = _group_results(results, SELECTIVE_METRIC)
     if not groups and not selective_groups:
         raise ValueError("No benchmark metrics were found in the summary file.")
 
-    metric_labels = [config["label"] for config in PLOT_METRICS.values()]
-    higher_better = {
-        config["label"]: config["higher_better"] for config in PLOT_METRICS.values()
-    }
+    trend_metrics = PLOT_METRICS | SELECTIVE_METRIC
+    trend_groups = _group_results(results, trend_metrics)
     figure_count = 0
 
-    for (dataset, backbone, config), methods in sorted(
-        groups.items(),
-        key=lambda item: (item[0][0], item[0][1], _config_sort_key(item[0][2])),
-    ):
-        title = f"{dataset} / {backbone} / {config}"
-        group_dir = output_path / _safe_name(dataset) / _safe_name(backbone)
-
-        comparison = _plot_metric_panels(methods, title)
-        _save_figure(
-            comparison,
-            group_dir / f"{_safe_name(config)}_comparison.png",
-            dpi,
-        )
-
-        heatmap_values = {
-            method: {
-                label: metric["mean"]
-                for label, metric in values.items()
-            }
-            for method, values in methods.items()
-        }
-        heatmap = plot_metric_heatmap(
-            heatmap_values,
-            metrics=metric_labels,
-            title=title,
-            higher_better=higher_better,
-        )
-        _save_figure(heatmap, group_dir / f"{_safe_name(config)}_heatmap.png", dpi)
-        figure_count += 2
-    for (dataset, backbone, config), methods in sorted(
-        selective_groups.items(),
-        key=lambda item: (item[0][0], item[0][1], _config_sort_key(item[0][2])),
-    ):
-        title = f"{dataset} / {backbone} / {config} — Selective classification"
-        group_dir = output_path / _safe_name(dataset) / _safe_name(backbone)
-        selective = _plot_metric_panels(methods, title, SELECTIVE_METRICS)
-        _save_figure(
-            selective,
-            group_dir / f"{_safe_name(config)}_selective.png",
-            dpi,
-        )
+    cross_dataset_figures = (
+        ("cross_dataset_heatmap.png", generate_cross_dataset_heatmap),
+        ("cross_dataset_profile.png", generate_cross_dataset_profile),
+    )
+    for filename, generator in cross_dataset_figures:
+        try:
+            figure = generator(results)
+        except (KeyError, ValueError) as error:
+            print(f"Skipped {filename}: {error}")
+            continue
+        _save_figure(figure, output_path / filename, dpi)
         figure_count += 1
 
-
-    figure_count += _plot_noise_trends(groups, output_path, dpi)
     figure_count += _plot_noise_trends(
-        selective_groups, output_path, dpi, SELECTIVE_METRICS, "_selective"
+        trend_groups,
+        output_path,
+        dpi,
+        metric_definitions=trend_metrics,
     )
     artifact_root = Path(results_dir) if results_dir else _PROJECT_ROOT / "results"
     for (dataset, backbone, config), _ in sorted(

@@ -258,14 +258,7 @@ def plot_multi_reliability(
             ordered_handles, legend_order, loc="lower right", frameon=False,
         )
 
-    fig.subplots_adjust(
-        left=0.055,
-        right=0.995,
-        bottom=0.09,
-        top=0.96,
-        wspace=0.20,
-        hspace=0.25,
-    )
+    fig.tight_layout()
     return fig
 
 

@@ -202,10 +202,7 @@ def plot_multi_uncertainty_comparison(
     for unused_ax in unused_axes:
         unused_ax.set_axis_off()
     unused_axes[-1].legend(
-        handles,
-        labels,
-        loc="center",
-        frameon=False,
+        handles, labels, loc="lower right", frameon=False,
     )
 
     fig.subplots_adjust(

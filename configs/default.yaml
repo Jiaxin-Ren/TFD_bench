@@ -43,7 +43,7 @@ training:
   epochs: 50
   batch_size: 128
   learning_rate: 0.001
-  seeds: [0]   #[0, 1, 2, 3, 4]
+  seeds: [0, 1, 2, 3, 4]
   n_runs: 5          # Used only when seeds is null
   val_split: 0.2
 
