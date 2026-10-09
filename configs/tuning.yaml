@@ -1,7 +1,7 @@
-# One-click experiment configuration
-# Run: python run.py
+# Validation-selected configuration for the final benchmark run.
+# Shared training/evaluation/hardware settings remain identical for every
+# method and dataset. Only method-specific parameters are tuned below.
 
-# Run every selected dataset × method × backbone combination.
 methods:
   - max_softmax
   - deep_ensemble
@@ -18,8 +18,6 @@ methods:
   - mc_dropout
   - mc_batch_norm
 
-# ResNet is supported by all methods. Add transformer, lenet, mlp, lstm, or
-# timesnet only after confirming that a method provides that variant.
 backbones:
   - resnet
 
@@ -36,15 +34,13 @@ datasets:
     root: /mnt/d/Data/Machine/XJTU
   - name: hit
     root: /mnt/d/Data/Machine/HIT
-  # - name: mgb
-  #   root: /mnt/d/Data/Machine/MGB
 
 training:
   epochs: 50
   batch_size: 128
   learning_rate: 0.001
   seeds: [0, 1, 2, 3, 4]
-  n_runs: 5          # Used only when seeds is null
+  n_runs: 5
   val_split: 0.2
 
 evaluation:
@@ -60,7 +56,6 @@ hardware:
 output:
   dir: results
 
-# Optional overrides passed only to the corresponding method.
 method_args:
   deep_ensemble:
     num_estimators: 4
@@ -101,9 +96,9 @@ method_args:
     noise_factor: 0.01
     num_estimators: 10
   edl:
-    reg_weight: 0.01
-    weight_decay: 0.005
-    loss_type: digamma
+    reg_weight: 0.00001
+    weight_decay: 0.0
+    loss_type: mse
   laplace_approx:
     weight_subset: last_layer
     hessian_struct: kron
@@ -119,23 +114,22 @@ method_args:
     mc_batch_size: 4
     last_only: true
 
-# Optional method-specific overrides for individual datasets. Keep shared
-# training, evaluation, and hardware parameters in their sections above.
-# Copy this file to configs/tuning.yaml and add tuned values there, for example:
-# method_dataset_args:
-#   edl:
-#     seu:
-#       reg_weight: 0.01
-#       weight_decay: 0.005
-#     pu:
-#       reg_weight: 0.001
-#       weight_decay: 0.001
-#   mc_dropout:
-#     seu:
-#       dropout_rate: 0.1
-#     pu:
-#       dropout_rate: 0.2
+# Dataset-specific overrides are limited to method-owned parameters.
+method_dataset_args:
+  edl:
+    xjtu:
+      loss_type: digamma
+  snapshot_ensemble:
+    pu:
+      cycle_length: 10
+    xjtu:
+      cycle_length: 10
+    cwru:
+      cycle_length: 10
+  sghmc:
+    xjtu:
+      friction: 0.1
 
 runner:
   continue_on_error: true
-  overwrite: true        # Replace the exact dataset/backbone/method result directory
+  overwrite: true

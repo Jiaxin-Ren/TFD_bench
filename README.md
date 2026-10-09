@@ -14,10 +14,11 @@
 
 ```text
 .
-├── configs/default.yaml    # 一键实验总配置
+├── configs/default.yaml    # 原始默认配置
+├── configs/tuning.yaml     # 已调参的正式实验配置
 ├── methods/                # 每种不确定性方法的独立入口
 ├── src/                    # 数据、模型、损失、指标和训练核心
-├── analysis/               # 结果汇总、表格和可视化
+├── analysis/               # 数值结果汇总和表格生成
 ├── docs/                   # 数据准备与完整复现指南
 ├── tests/                  # 配置、结果 schema 与加载 smoke tests
 ├── requirements.txt        # Python 依赖及验证版本
@@ -100,9 +101,33 @@ python run.py --dry-run
 python run.py
 ```
 
-默认会覆盖所选数据集、模型和方法对应的旧实验目录；不会删除其他未选中的实验结果。可在 `runner` 配置中通过 `overwrite` 关闭覆盖行为。训练完成后，再按“结果汇总与可视化”一节中的命令生成汇总、表格和图片。
+默认会覆盖所选数据集、模型和方法对应的旧实验目录；不会删除其他未选中的实验结果。可在 `runner` 配置中通过 `overwrite` 关闭覆盖行为。训练完成后，再按“结果分析”一节中的命令生成数值汇总和表格。
 
-`run.py` 会依次执行每个 `dataset × method × backbone` 组合。默认在某个组合失败后继续运行其他组合，并在结束时汇总失败项；可通过配置中的 `runner.continue_on_error` 修改该行为。
+`runner.workers` 未设置或为 `1` 时，`run.py` 会依次执行每个
+`dataset × method × backbone` 组合。服务器有多张 GPU 时，可以让每张 GPU
+运行一个独立的单卡任务：
+
+```yaml
+hardware:
+  accelerator: gpu
+  devices: 1
+  strategy: auto
+
+runner:
+  workers: 8
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  resume: true
+  continue_on_error: true
+```
+
+并行 runner 会为每个 worker 设置对应的 `CUDA_VISIBLE_DEVICES`，并强制子任务
+使用 `devices=1`，不会让一个实验跨多张卡运行 DDP。运行状态保存在输出目录的
+`runner_status.csv`，各任务日志保存在 `_runner_logs/`。`resume: true` 会跳过
+manifest、`runs.csv` 和 `summary.csv` 均完整的组合。也可以通过
+`--workers 4 --gpus 0,1,2,3 --resume` 临时覆盖 runner 配置。
+
+默认在某个组合失败后继续运行其他组合，并在结束时汇总失败项；可通过配置中的
+`runner.continue_on_error` 修改该行为。
 
 > 并非所有方法都支持所有 backbone。`resnet` 的兼容性最完整；增加其他 backbone 前建议先用 `--dry-run` 检查实验矩阵，并单独运行一次对应方法。
 
@@ -187,13 +212,56 @@ method_args:
     num_estimators: 50
     ood_criterion: mi
 
-  conformal_aps:
-    alpha: 0.01
-    randomized: true
-    enable_ts: false
 ```
 
 YAML 中的下划线参数会自动转换为命令行的连字符形式，例如 `num_estimators` 会转换为 `--num-estimators`。布尔值会转换为 `--flag` 或 `--no-flag`。
+
+同一方法需要针对不同数据集使用不同的独有超参数时，使用
+`method_dataset_args`。第一层是方法名，第二层是数据集名：
+
+```yaml
+method_args:
+  edl:
+    loss_type: digamma
+  mc_dropout:
+    num_estimators: 10
+    ood_criterion: mi
+
+method_dataset_args:
+  edl:
+    seu:
+      reg_weight: 0.01
+      weight_decay: 0.005
+    pu:
+      reg_weight: 0.001
+      weight_decay: 0.001
+
+  mc_dropout:
+    seu:
+      dropout_rate: 0.1
+    pu:
+      dropout_rate: 0.2
+```
+
+通过 `run.py` 批量运行时，方法参数优先级为：
+
+```text
+方法文件默认值 < method_args < method_dataset_args
+```
+
+`method_dataset_args` 只能填写方法独有参数，不能覆盖 `epochs`、`lr`、
+`batch_size`、`seeds`、`val_split`、硬件设置或评估开关。公共参数继续在
+`training`、`hardware` 和 `evaluation` 中统一设置，以保证不同方法和数据集的
+实验条件一致。仓库中的 `configs/tuning.yaml` 已保存正式实验的调参结果，
+请直接使用，运行前更新其中的 `datasets[].root` 为当前机器的数据路径：
+
+```powershell
+python run.py --config configs/tuning.yaml --dry-run
+python run.py --config configs/tuning.yaml
+```
+
+需要开展新的调参实验时，请将配置复制到其他名称，例如
+`configs/my_tuning.yaml`，以保留现有 `tuning.yaml`。
 
 ## 参数优先级
 
@@ -233,7 +301,6 @@ YAML 中的下划线参数会自动转换为命令行的连字符形式，例如
 | 集成方法 | `deep_ensemble`, `packed_ensemble`, `batch_ensemble`, `snapshot_ensemble`, `checkpoint_ensemble` |
 | 贝叶斯方法 | `variational_bnn`, `swag`, `sgld`, `sghmc` |
 | 证据方法 | `edl` |
-| 共形预测 | `conformal_aps`, `conformal_raps`, `conformal_thr` |
 | 后处理/采样 | `temperature_scaling`, `laplace_approx`, `mc_dropout`, `mc_batch_norm` |
 
 方法名称与 `methods/<方法名称>.py` 一一对应。
@@ -244,8 +311,7 @@ EDL 通过 Softplus 将 backbone 输出转换为非负 evidence。训练使用 `
 
 主 OOD 指标使用各方法的原生不确定性准则：确定性基线使用 MSP，EDL 使用
 Dirichlet vacuity `K/S`，采样和集成方法使用互信息（MI），Temperature Scaling
-和 Laplace 使用后处理概率上的 MSP，Conformal 使用预测集合大小。同时，
-Conformal 另外报告 Coverage Rate 和 Set Size。
+和 Laplace 使用后处理概率上的 MSP。
 
 ## 支持的模型
 
@@ -316,9 +382,9 @@ results/<dataset>/<backbone>/<method>/
 - `runs.csv`：所有随机种子的原始指标，是方法级结果的统一入口
 - `summary.csv`：长表格式的均值、标准差与有效运行数
 - `manifest.json`：结果格式版本、运行状态、方法参数与文件索引
-- `predictions/*.npz`：逐样本概率、标签及方法原生 OOD 分数，供诊断图使用
+- `predictions/*.npz`：逐样本概率、标签及方法原生 OOD 分数，供数值核验使用
 
-`seed<seed>/logs/` 仅保存 Lightning 训练过程日志，不作为结果汇总或绘图输入。旧版本的
+`seed<seed>/logs/` 仅保存 Lightning 训练过程日志，不作为结果汇总输入。旧版本的
 `raw_all_seeds.csv` 仍可读取；使用当前代码重跑后会自动采用上述统一格式。
 
 启用噪声评估后，每个随机种子还会运行数据集定义的不同噪声类型和严重程度，因此运行时间会明显增加。调试代码时建议使用：
@@ -354,17 +420,10 @@ python analysis/collect_results.py \
   --method edl
 ```
 
-一次完成结果收集、Markdown 表格和全部图片：
-
-```bash
-python analysis/generate_report.py
-```
-
-输出统一保存在 `results/summary.json`、`results/tables/` 和 `results/figures/`。统计与绘图
-只包含论文方法表中的 TS、VBNN、SGLD、SGHMC、DE、SE、BE、PE、SWAG、LA、MCD、
-MCBN 和 EDL，并按该顺序展示。Max Softmax、Checkpoint Ensemble 和 Conformal 方法的
-原始实验结果仍会保留，但不会进入汇总统计、结果表格或图片。训练命令不会自动执行
-报告生成。ECE 的训练评估、seed stability 与 reliability diagram 均统一使用 10 个分箱。
+汇总保存到 `results/summary.json`。结果收集包含 MSP 和论文中的 13 种不确定性方法，
+表格默认展示 TS、VBNN、SGLD、SGHMC、DE、SE、BE、PE、SWAG、LA、MCD、MCBN 和 EDL。
+Checkpoint Ensemble 的原始实验结果仍保留，但不进入默认汇总和表格。
+训练命令不会自动执行结果汇总。ECE 评估使用 10 个分箱。
 
 也可以单独生成对比表格：
 
@@ -400,7 +459,6 @@ python analysis/generate_tables.py --format html
 ```bash
 python analysis/collect_results.py
 python analysis/generate_tables.py
-python analysis/visualization/plot_all.py
 ```
 
 常规方法使用验证集 `NLL` 最小的 epoch 作为最佳 checkpoint。SGLD、SGHMC 和
@@ -408,57 +466,6 @@ SWAG 属于 posterior sampling 方法，评估训练结束时形成的完整样�
 单独 epoch 的最佳 checkpoint；它们的预训练模型仍由验证集 NLL 选择。测试集以及
 噪声测试结果均不参与模型选择，多个随机种子独立运行后再汇总均值和标准差。
 
-一键生成所有可用图片：
-
-```bash
-python analysis/visualization/plot_all.py
-```
-
-还可以从上述 13 种方法中进一步排除任意方法：
-
-```bash
-python analysis/visualization/plot_all.py --exclude-methods swag sgld sghmc
-```
-
-对比图中的点为多个随机种子的均值，误差线为样本标准差。不同噪声类型分别成图，
-不会把 Gaussian、Impulse 等不同噪声首尾连接。需要先清理之前生成的图片时使用：
-图片不设置数据集、模型或测试配置形式的总标题，这些信息由
-`results/figures/<dataset>/<backbone>/<config>_<figure>.png` 路径和文件名表达；
-多子图内部用于识别方法或指标的短标签仍会保留。
-选择性分类同时记录 AURC、AUGRC、Cov@5%Risk 和 Risk@80%Cov。
-`plot_all.py` 会为 clean、operating shift 和每个噪声配置生成
-`<config>_selective.png`、`<config>_reliability.png` 和
-`<config>_ood_scores.png`。其中可靠性图展示 Accuracy、Calibration gap 和百分数形式的
-ECE，OOD 分数图比较各方法原生不确定性在 ID 与 OOD 样本上的分布。程序还会基于原生
-不确定性生成对应的风险—覆盖图；噪声严重度趋势另存为
-`noise_<type>_selective.png`。ROC/PR 和 seed stability 仍仅针对 clean 配置生成。
-
-
-```bash
-python analysis/visualization/plot_all.py --clean
-```
-
-图片默认保存到 `results/figures/<dataset>/<backbone>/`。每个画图文件也都可以独立运行，
-其默认输出同样位于 `results/figures/`：
-
-```bash
-# 只依赖 results/summary.json；旧实验结果也可以直接画
-python analysis/visualization/comparison.py --dataset seu --backbone resnet
-python analysis/visualization/noise_robustness.py --dataset seu --backbone resnet
-
-# 依赖 seed*/predictions/*.npz
-python analysis/visualization/reliability.py --dataset seu --backbone resnet
-python analysis/visualization/roc.py --dataset seu --backbone resnet
-python analysis/visualization/uncertainty.py --dataset seu --backbone resnet
-python analysis/visualization/risk_coverage.py --dataset seu --backbone resnet
-python analysis/visualization/seed_stability.py --dataset seu --backbone resnet
-```
-
-所有独立命令都支持 `--methods edl deep_ensemble`、`--config clean`、`--output`（噪声图使用
-`--output-dir`）等筛选参数，可用 `python <文件> --help` 查看完整参数。可靠性、ROC/PR、
-OOD 分数分布、风险—覆盖和 seed 稳定性必须使用逐样本预测；旧结果中若没有
-`predictions/*.npz`，需要用当前代码重跑相应方法一次。训练不会自动画图，只有显式运行上述
-分析命令时才生成图片。
 
 ## 数据准备与复现
 
@@ -467,7 +474,8 @@ OOD 分数分布、风险—覆盖和 seed 稳定性必须使用逐样本预测�
 - [`docs/DATASETS.md`](docs/DATASETS.md)：八个 loader 所需目录、文件名和已核实的官方来源
 - [`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md)：环境记录、smoke test、完整实验、结果归档和复现边界
 
-公开配置使用仓库相对路径 `./data/SEU` 和 `./data/MGB`。可以把数据放到这些目录，也可以修改 YAML 中的 `datasets[].root`。`data/` 已加入 `.gitignore`。
+运行前请将默认或调参配置中的 `datasets[].root` 更新为当前机器的数据路径。
+`data/` 已加入 `.gitignore`。
 
 无数据即可执行的发布前检查：
 

@@ -116,7 +116,6 @@ def promote_postprocess_metrics(results: Results) -> Results:
 
     The raw base-model metrics remain available under ``base/...`` and the
     original ``test/post/...`` keys are retained for detailed inspection.
-    Conformal-only metrics such as coverage and set size are left unchanged.
     """
     for metrics in results.values():
         for key, value in list(metrics.items()):
@@ -138,7 +137,7 @@ def save_prediction_artifacts(
     config: str,
     datamodule: Any | None = None,
 ) -> Path | None:
-    """Save real per-sample predictions used by standalone plotting commands."""
+    """Save real per-sample predictions for reproducible result inspection."""
     logger = getattr(trainer, "logger", None)
     save_dir = getattr(logger, "save_dir", None)
     if save_dir is None or not hasattr(routine, "get_prediction_artifacts"):

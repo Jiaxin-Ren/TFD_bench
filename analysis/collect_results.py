@@ -18,7 +18,7 @@ import numpy as np
 _PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from analysis.methods import PLOT_METHODS  # noqa: E402
+from analysis.methods import RESULT_METHODS  # noqa: E402
 
 DISPLAY_METRICS = ("test/cls/Acc", "test/cal/ECE", "ood/AUROC")
 CONFIG_ALIASES = {
@@ -43,7 +43,7 @@ def _read_standard_metrics(
     if len(parts) < 4:
         return []
     dataset, backbone, method = parts[:3]
-    if method not in PLOT_METHODS:
+    if method not in RESULT_METHODS:
         return []
     # Ignore stale result directories left behind after a method is renamed or
     # removed.

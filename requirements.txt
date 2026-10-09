@@ -16,9 +16,8 @@ PyYAML==6.0.3
 rich==15.0.0
 tqdm==4.68.3
 
-# Result analysis and visualization
+# Result analysis
 scikit-learn==1.7.2
-matplotlib==3.10.9
 
 # Method/backbone-specific dependencies
 laplace-torch==0.2.2.2

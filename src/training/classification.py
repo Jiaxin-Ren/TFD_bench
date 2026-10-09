@@ -28,13 +28,11 @@ from src.metrics import (
     CalibrationError,
     CategoricalNLL,
     CovAt5Risk,
-    CoverageRate,
     Disagreement,
     Entropy,
     GroupingLoss,
     MutualInformation,
     RiskAt80Cov,
-    SetSize,
 )
 from src.models.wrappers import (
     EPOCH_UPDATE_MODEL,
@@ -46,7 +44,7 @@ from src.metrics.ood import (
     TUOODCriterion,
     get_ood_criterion,
 )
-from src.post_processing import Conformal, LaplaceApprox, PostProcessing
+from src.post_processing import LaplaceApprox, PostProcessing
 from src.training.transforms import (
     Mixup,
     MixupIO,
@@ -255,14 +253,7 @@ class ClassificationRoutine(LightningModule):
         self.test_cls_metrics = cls_metrics.clone(prefix="test/")
         self.test_sc_metrics = sc_metrics.clone(prefix="test/")
 
-        if self.post_processing is not None and isinstance(self.post_processing, Conformal):
-            self.post_cls_metrics = MetricCollection(
-                {
-                    "test/post/CoverageRate": CoverageRate(),
-                    "test/post/SetSize": SetSize(),
-                },
-            )
-        elif self.post_processing is not None:
+        if self.post_processing is not None:
             self.post_cls_metrics = cls_metrics.clone(prefix="test/post/")
             self.post_sc_metrics = sc_metrics.clone(prefix="test/post/")
 
@@ -425,8 +416,6 @@ class ClassificationRoutine(LightningModule):
                 "ood_probs": [],
                 "ood_base_probs": [],
                 "ood_scores": [],
-                "id_prediction_sets": [],
-                "ood_prediction_sets": [],
             }
 
         if getattr(self.model, "need_bn_update", False):
@@ -552,7 +541,7 @@ class ClassificationRoutine(LightningModule):
 
         if self.post_processing is not None:
             pp_logits = self.post_processing(inputs)
-            if isinstance(self.post_processing, LaplaceApprox | Conformal):
+            if isinstance(self.post_processing, LaplaceApprox):
                 pp_probs = pp_logits
             else:
                 pp_probs = F.softmax(pp_logits, dim=-1)
@@ -568,7 +557,7 @@ class ClassificationRoutine(LightningModule):
 
         if self.collect_predictions:
             primary_probs = probs
-            if self.post_processing is not None and not isinstance(self.post_processing, Conformal):
+            if self.post_processing is not None:
                 primary_probs = pp_probs
             prefix = "id" if dataloader_idx == 0 else "ood"
             if dataloader_idx in (0, 1):
@@ -587,19 +576,13 @@ class ClassificationRoutine(LightningModule):
                 self._prediction_storage["ood_scores"].append(
                     ood_scores.detach().flatten().cpu()
                 )
-            if dataloader_idx in (0, 1) and isinstance(self.post_processing, Conformal):
-                self._prediction_storage[f"{prefix}_prediction_sets"].append(
-                    pp_probs.detach().cpu()
-                )
 
         if dataloader_idx == 0:
             # Classification and selective-classification metrics are separated
             # because the latter consume each method's native uncertainty score.
             metric_probs = probs.squeeze(-1) if self.binary_cls else probs
             self.test_cls_metrics.update(metric_probs, targets)
-            if self.post_processing is not None and not isinstance(
-                self.post_processing, Conformal
-            ):
+            if self.post_processing is not None:
                 base_uncertainty = -probs.max(dim=-1).values
                 self.test_sc_metrics.update(metric_probs, targets, base_uncertainty)
             else:
@@ -619,8 +602,7 @@ class ClassificationRoutine(LightningModule):
 
             if self.post_processing is not None:
                 self.post_cls_metrics.update(pp_probs, targets)
-                if not isinstance(self.post_processing, Conformal):
-                    self.post_sc_metrics.update(pp_probs, targets, ood_scores)
+                self.post_sc_metrics.update(pp_probs, targets, ood_scores)
 
         if self.eval_ood and dataloader_idx == 1:
             self.test_ood_metrics.update(ood_scores, torch.ones_like(targets))
@@ -661,8 +643,7 @@ class ClassificationRoutine(LightningModule):
 
         if self.post_processing is not None and self.log_post_processing:
             result_dict |= self.post_cls_metrics.compute()
-            if not isinstance(self.post_processing, Conformal):
-                result_dict |= self.post_sc_metrics.compute()
+            result_dict |= self.post_sc_metrics.compute()
 
         if self.eval_grouping_loss:
             result_dict |= self.test_grouping_loss.compute()
@@ -693,8 +674,7 @@ class ClassificationRoutine(LightningModule):
         self.test_id_entropy.reset()
         if self.post_processing is not None:
             self.post_cls_metrics.reset()
-            if not isinstance(self.post_processing, Conformal):
-                self.post_sc_metrics.reset()
+            self.post_sc_metrics.reset()
         if self.eval_grouping_loss:
             self.test_grouping_loss.reset()
         if self.is_ensemble:

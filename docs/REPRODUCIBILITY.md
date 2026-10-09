@@ -92,14 +92,15 @@ results/<dataset>/<backbone>/<method>/
     └── logs/
 ```
 
-`manifest.json` records schema version, arguments, seeds and completion status. `runs.csv` is the canonical method-level raw table. `summary.csv` is a tidy mean/std/count table. Prediction archives are the source for reliability, ROC/PR, OOD-score and risk-coverage plots.
+`manifest.json` records schema version, arguments, seeds and completion status. `runs.csv` is the canonical method-level raw table. `summary.csv` is a tidy mean/std/count table. Prediction archives retain per-sample probabilities, labels and uncertainty scores for independent numerical verification.
 
 Primary comparison metrics are ACC, ECE and OOD AUROC. OOD output also includes overall AUROC, per-source AUROC and macro AUROC. Report the configured seed count and do not silently combine results produced with different configurations.
 
-## 6. Generate the report
+## 6. Collect results and generate tables
 
 ```bash
-python analysis/generate_report.py
+python analysis/collect_results.py
+python analysis/generate_tables.py
 ```
 
 This creates:
@@ -107,10 +108,9 @@ This creates:
 ```text
 results/summary.json
 results/tables/table.md
-results/figures/<dataset>/<backbone>/
 ```
 
-The report command is separate from training and does not overwrite method checkpoints. Conformal methods are excluded from figures by default; pass `--include-conformal` to include them.
+Result collection and table generation are separate from training and do not overwrite method checkpoints.
 
 ## 7. Archive a reproducible run
 

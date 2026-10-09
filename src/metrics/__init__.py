@@ -11,13 +11,11 @@ from .classification import (
     CategoricalNLL,
     CovAt5Risk,
     CovAtxRisk,
-    CoverageRate,
     Disagreement,
     Entropy,
     GroupingLoss,
     MutualInformation,
     RiskAt80Cov,
     RiskAtxCov,
-    SetSize,
     VariationRatio,
 )

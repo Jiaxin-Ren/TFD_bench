@@ -16,9 +16,9 @@ METHOD_ORDER = (
     "edl",
 )
 
-# MSP is the deterministic reference used in every figure, but it is kept
+# MSP is the deterministic reference retained in collected results, but kept
 # outside METHOD_ORDER so the paper's UQ-only result tables remain unchanged.
-PLOT_METHOD_ORDER = ("max_softmax",) + METHOD_ORDER
+RESULT_METHODS = frozenset(("max_softmax",) + METHOD_ORDER)
 
 
 METHOD_ABBREVIATIONS = {
@@ -39,15 +39,7 @@ METHOD_ABBREVIATIONS = {
 }
 
 BENCHMARK_METHODS = frozenset(METHOD_ORDER)
-PLOT_METHODS = frozenset(PLOT_METHOD_ORDER)
 METHOD_RANK = {method: index for index, method in enumerate(METHOD_ORDER)}
-PLOT_METHOD_RANK = {
-    method: index for index, method in enumerate(PLOT_METHOD_ORDER)
-}
-DISPLAY_RANK = {
-    METHOD_ABBREVIATIONS[method]: rank
-    for method, rank in PLOT_METHOD_RANK.items()
-}
 
 
 def display_method(name: str) -> str:
@@ -56,16 +48,8 @@ def display_method(name: str) -> str:
 
 
 
-def method_display_sort_key(name: str) -> tuple[int, str]:
-    """Sort displayed abbreviations in the paper's UQ-method order."""
-    return DISPLAY_RANK.get(name, len(DISPLAY_RANK)), name
-
 def method_sort_key(name: str) -> tuple[int, str]:
     """Sort methods in the same order as the paper's UQ-method table."""
     return METHOD_RANK.get(name, len(METHOD_RANK)), name
 
-
-def plot_method_sort_key(name: str) -> tuple[int, str]:
-    """Sort plotting methods with MSP first, followed by the paper order."""
-    return PLOT_METHOD_RANK.get(name, len(PLOT_METHOD_RANK)), name
 

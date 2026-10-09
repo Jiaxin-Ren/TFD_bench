@@ -153,16 +153,6 @@ class PostProcessingCriterion(MaxSoftmaxCriterion):
     input_type = OODCriterionInputType.POST_PROCESSING
 
 
-class ConformalSetSizeCriterion(TUOODCriterion):
-    """Use prediction-set cardinality as conformal uncertainty."""
-
-    input_type = OODCriterionInputType.POST_PROCESSING
-    single_only = True
-
-    def forward(self, inputs: Tensor) -> Tensor:
-        return inputs.bool().sum(dim=-1).float()
-
-
 class EntropyCriterion(TUOODCriterion):
     input_type = OODCriterionInputType.ESTIMATOR_PROB
 
@@ -305,8 +295,6 @@ def get_ood_criterion(ood_criterion: type[TUOODCriterion] | str) -> TUOODCriteri
             return MaxSoftmaxCriterion()
         if ood_criterion == "post_processing":
             return PostProcessingCriterion()
-        if ood_criterion == "conformal_set_size":
-            return ConformalSetSizeCriterion()
         if ood_criterion == "entropy":
             return EntropyCriterion()
         if ood_criterion == "evidential":
@@ -317,7 +305,7 @@ def get_ood_criterion(ood_criterion: type[TUOODCriterion] | str) -> TUOODCriteri
             return VariationRatioCriterion()
         raise ValueError(
             "The OOD criterion must be one of 'msp', 'logit', 'energy', 'entropy',"
-            " 'evidential', 'conformal_set_size', 'post_processing',"
+            " 'evidential', 'post_processing',"
             f" 'mutual_information' or 'variation_ratio'. Got {ood_criterion}."
         )
     if isinstance(ood_criterion, type):

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import yaml
 
@@ -39,6 +43,108 @@ class RunConfigTests(unittest.TestCase):
         self.assertEqual(Path(commands[1][1]).stem, "edl")
         self.assertIn("--reg-weight", commands[1])
         self.assertEqual(commands[1][commands[1].index("--reg-weight") + 1], "0.01")
+
+    def test_empty_method_dataset_args_preserves_existing_commands(self) -> None:
+        config = {
+            "methods": ["edl"],
+            "backbones": ["resnet"],
+            "datasets": [{"name": "seu", "root": "./data/SEU"}],
+            "method_args": {"edl": {"reg_weight": 0.01}},
+        }
+        original = benchmark_run.build_commands(Path("experiment.yaml"), config)
+        with_empty_section = benchmark_run.build_commands(
+            Path("experiment.yaml"),
+            {**config, "method_dataset_args": {}},
+        )
+        self.assertEqual(with_empty_section, original)
+
+    def test_method_dataset_args_are_scoped_and_override_method_args(self) -> None:
+        config = {
+            "methods": ["edl", "mc_dropout"],
+            "backbones": ["resnet"],
+            "datasets": [
+                {"name": "seu", "root": "./data/SEU"},
+                {"name": "pu", "root": "./data/PU"},
+            ],
+            "method_args": {
+                "edl": {"reg_weight": 0.01, "loss_type": "digamma"},
+                "mc_dropout": {"num_estimators": 10},
+            },
+            "method_dataset_args": {
+                "edl": {"seu": {"reg_weight": 0.02}},
+                "mc_dropout": {"pu": {"dropout_rate": 0.2}},
+            },
+        }
+        commands = benchmark_run.build_commands(Path("experiment.yaml"), config)
+        indexed = {
+            (
+                Path(command[1]).stem,
+                command[command.index("--dataset") + 1],
+            ): command
+            for command in commands
+        }
+
+        edl_seu = indexed[("edl", "seu")]
+        edl_pu = indexed[("edl", "pu")]
+        mc_seu = indexed[("mc_dropout", "seu")]
+        mc_pu = indexed[("mc_dropout", "pu")]
+        self.assertEqual(edl_seu[edl_seu.index("--reg-weight") + 1], "0.02")
+        self.assertEqual(edl_pu[edl_pu.index("--reg-weight") + 1], "0.01")
+        self.assertIn("--loss-type", edl_seu)
+        self.assertNotIn("--dropout-rate", mc_seu)
+        self.assertEqual(mc_pu[mc_pu.index("--dropout-rate") + 1], "0.2")
+        self.assertNotIn("--dropout-rate", edl_pu)
+
+    def test_method_dataset_args_reject_common_arguments(self) -> None:
+        base = {
+            "methods": ["edl"],
+            "backbones": ["resnet"],
+            "datasets": [{"name": "seu", "root": "./data/SEU"}],
+        }
+        for argument, value in (
+            ("epochs", 10),
+            ("lr", 0.01),
+            ("batch-size", 32),
+            ("seeds", [0]),
+            ("val_split", 0.1),
+            ("devices", 2),
+            ("eval_noise", False),
+            ("workers", 2),
+        ):
+            with self.subTest(argument=argument):
+                config = {
+                    **base,
+                    "method_dataset_args": {
+                        "edl": {"seu": {argument: value}},
+                    },
+                }
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"method_dataset_args\.edl\.seu.*common argument.*{argument}",
+                ):
+                    benchmark_run.build_commands(Path("experiment.yaml"), config)
+
+    def test_method_dataset_args_reject_invalid_hierarchy(self) -> None:
+        base = {
+            "methods": ["edl"],
+            "backbones": ["resnet"],
+            "datasets": [{"name": "seu", "root": "./data/SEU"}],
+        }
+        invalid_values = (
+            ([], "method_dataset_args must be a mapping"),
+            ({"edl": []}, "method_dataset_args.edl must be a mapping"),
+            (
+                {"edl": {"seu": []}},
+                "method_dataset_args.edl.seu must be a mapping",
+            ),
+        )
+        for value, message in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TypeError, message):
+                    benchmark_run.build_commands(
+                        Path("experiment.yaml"),
+                        {**base, "method_dataset_args": value},
+                    )
 
     def test_forwards_dataset_specific_window_limits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -77,7 +183,105 @@ class RunConfigTests(unittest.TestCase):
         command: list[str] = []
         benchmark_run.append_option(command, "eval_noise", False)
         benchmark_run.append_option(command, "overwrite", True)
-        self.assertEqual(command, ["--no-eval-noise", "--overwrite"])
+        benchmark_run.append_option(command, "values", [1, 2])
+        self.assertEqual(
+            command,
+            ["--no-eval-noise", "--overwrite", "--values", "1", "2"],
+        )
+
+    def test_parallel_gpu_parsing_and_single_gpu_overrides(self) -> None:
+        self.assertEqual(benchmark_run.parse_gpu_ids("7,3,1", 3), [7, 3, 1])
+        self.assertEqual(benchmark_run.parse_gpu_ids([4, 5], 2), [4, 5])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            benchmark_run.parse_gpu_ids("0,0", 2)
+
+        command = ["python", "method.py", "--devices", "8", "--strategy", "ddp"]
+        overridden = benchmark_run.force_single_visible_gpu(command)
+        self.assertEqual(
+            overridden[-6:],
+            ["--accelerator", "gpu", "--devices", "1", "--strategy", "auto"],
+        )
+
+    def test_resume_requires_complete_matching_result(self) -> None:
+        command = [
+            "python",
+            str(benchmark_run.PROJECT_ROOT / "methods" / "max_softmax.py"),
+            "--dataset", "demo",
+            "--backbone", "resnet",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            config = {"output": {"dir": directory}}
+            output = benchmark_run.result_dir(config, command)
+            output.mkdir(parents=True)
+            manifest = output / "manifest.json"
+            manifest.write_text(
+                '{"status":"complete","dataset":"demo",'
+                '"method":"max_softmax","backbone":"resnet"}',
+                encoding="utf-8",
+            )
+            self.assertFalse(benchmark_run.has_complete_result(config, command))
+
+            (output / "runs.csv").write_text("seed,config\n", encoding="utf-8")
+            (output / "summary.csv").write_text("config,metric\n", encoding="utf-8")
+            self.assertTrue(benchmark_run.has_complete_result(config, command))
+
+            manifest.write_text(
+                '{"status":"complete","dataset":"other",'
+                '"method":"max_softmax","backbone":"resnet"}',
+                encoding="utf-8",
+            )
+            self.assertFalse(benchmark_run.has_complete_result(config, command))
+
+    def test_parallel_runner_assigns_one_job_to_each_gpu(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = {"output": {"dir": directory}}
+            commands = [
+                [
+                    "python", "max_softmax.py", "--dataset", "seu",
+                    "--backbone", "resnet",
+                ],
+                [
+                    "python", "edl.py", "--dataset", "wt",
+                    "--backbone", "resnet",
+                ],
+            ]
+            barrier = threading.Barrier(2)
+
+            def finish_together(*args, **kwargs):
+                barrier.wait(timeout=2)
+                return SimpleNamespace(returncode=0)
+
+            with patch("run.subprocess.run", side_effect=finish_together) as mocked:
+                failures = benchmark_run.run_parallel(
+                    commands,
+                    config,
+                    gpu_ids=[2, 5],
+                    continue_on_error=True,
+                    resume=False,
+                )
+
+            with (Path(directory) / "runner_status.csv").open(
+                newline="", encoding="utf-8"
+            ) as stream:
+                rows = list(csv.DictReader(stream))
+
+        self.assertFalse(failures)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual({row["gpu"] for row in rows}, {"2", "5"})
+        self.assertEqual({row["status"] for row in rows}, {"complete"})
+        visible = {
+            call.kwargs["env"]["CUDA_VISIBLE_DEVICES"]
+            for call in mocked.call_args_list
+        }
+        self.assertEqual(visible, {"2", "5"})
+        for call in mocked.call_args_list:
+            self.assertEqual(
+                call.args[0][-6:],
+                [
+                    "--accelerator", "gpu", "--devices", "1",
+                    "--strategy", "auto",
+                ],
+            )
 
     def test_shift_evaluation_config_and_cli_override(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
