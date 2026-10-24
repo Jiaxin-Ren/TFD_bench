@@ -50,7 +50,7 @@ def run(args):
 if __name__ == "__main__":
     parser = add_experiment_args(add_common_args(argparse.ArgumentParser()))
     parser.add_argument("--kl-weight", type=float, default=1e-4)
-    parser.add_argument("--num-samples", type=int, default=3)
+    parser.add_argument("--num-samples", type=int, default=10)
     parser.add_argument("--ood-criterion", choices=["entropy", "mi"], default="mi")
     args = parser.parse_args()
     print_gpu_config(load_gpu_config(args))

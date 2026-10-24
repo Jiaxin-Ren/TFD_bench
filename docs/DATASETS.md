@@ -6,18 +6,20 @@ Set `datasets[].root` in the YAML to the directory described below. Paths may be
 
 ## Dataset summary
 
-| ID | Loader input | Expected root |
-|---|---|---|
-| `seu` | Flat CSV recordings | Directory containing the listed bearing and gear CSV files |
-| `mgb` | Flat CSV recordings | Directory containing the listed MGB CSV files |
-| `wt` | MATLAB files grouped by fault folder | Directory containing `broken/`, `healthy/`, `missing_tooth/`, `root_crack/`, `wear/` |
-| `pu` | Paderborn MATLAB hierarchy | The extracted `PU-dataset-main/` directory |
-| `xjtu` | Class folders containing two text channels | Directory containing the nine `1ndBearing_*`/`2ndPlanetary_*` folders |
-| `hit` | Five NumPy arrays | Directory containing `data1.npy` through `data5.npy` |
-| `cwru` | CWRU 12 kHz drive-end MATLAB files | Extracted `12k/` directory containing numbered `.mat` files |
-| `thu` | Flat CSV recordings | Directory containing files formed from the configured fault prefixes and operating-condition suffixes |
+The manuscript's formal evaluation uses SEU, WT, PU, XJTU, HIT and CWRU.
+MGB and THU are additional supported loaders and are not part of the default
+six-dataset evaluation.
 
-## SEU
+| ID | Public source | Expected root |
+|---|---|---|
+| `seu` | [SEU release](https://github.com/cathysiyu/Mechanical-datasets) | Flat directory containing the listed bearing and gear CSV files |
+| `wt` | [WT release](https://github.com/Liudd-BJUT/WT-planetary-gearbox-dataset) | Directory containing `broken/`, `healthy/`, `missing_tooth/`, `root_crack/`, `wear/` |
+| `pu` | [Paderborn Data Center](https://mb.uni-paderborn.de/kat/forschung/bearing-datacenter/data-sets-and-download) | The extracted/reorganized `PU-dataset-main/` directory |
+| `xjtu` | [XJTUGearbox release](https://github.com/HazeDT/PHMGNNBenchmark#datasets) | Directory containing the nine `1ndBearing_*`/`2ndPlanetary_*` folders |
+| `hit` | [HIT release](https://github.com/HouLeiHIT/HIT-dataset) | Directory containing `data1.npy` through `data5.npy` |
+| `cwru` | [CWRU Data Center](https://engineering.case.edu/bearingdatacenter/download-data-file) | Extracted `12k/` directory containing numbered `.mat` files |
+| `mgb` | Additional loader | Flat directory containing the listed MGB CSV files |
+| `thu` | Additional loader | Directory containing the configured fault/condition CSV files |
 
 ## Leakage-resistant split protocol
 
@@ -37,6 +39,10 @@ Every temporal split retains source and window-index metadata for automatic
 overlap auditing. Repeated DataModule construction produces the same partition
 regardless of the uncertainty method, backbone or training seed.
 
+## SEU
+
+The SEU release separates bearing and gear recordings into subdirectories;
+place the required CSV files together under the configured root.
 
 Expected files are flat under the configured root. ID files include:
 
@@ -50,9 +56,9 @@ outer_20_0.csv
 
 OOD files are `Chipped`, `Miss`, `Root` and `Surface` recordings at conditions `20_0` and `30_2`. Shift files use the ID fault names at condition `30_2`. The loader skips the first 16 lines and reads the second signal column; preserve the original delimiters.
 
-## MGB
+## MGB (additional support)
 
-Expected files are flat CSV recordings. The current benchmark uses six ID files at `2500_0`, selected shift files at `3000_40`, and these OOD sources:
+Expected files are flat CSV recordings. This additional loader uses six ID files at `2500_0`, selected shift files at `3000_40`, and these OOD sources:
 
 ```text
 ORS1_var.csv
@@ -89,9 +95,13 @@ limits can be changed with the dataset-level YAML keys
 `max_shift_windows_per_file`. Every MATLAB file must contain a `Data` array
 with four channels.
 
+If the release groups recordings by assembly (for example,
+`broken/1/B1_30.MAT`), place the Assembly 1 files directly in each fault folder
+to match the hierarchy above. Download the actual MAT files, not Git LFS pointers.
+
 ## PU
 
-Official source: [Paderborn University Bearing Data Center](https://mb.uni-paderborn.de/kat/forschung/datacenter/bearing-datacenter).
+Official source: [Paderborn University Bearing Data Center](https://mb.uni-paderborn.de/kat/forschung/bearing-datacenter/data-sets-and-download).
 
 Point the root to the extracted directory containing operating-condition folders such as:
 
@@ -124,6 +134,8 @@ Expected hierarchy:
 
 Each class folder must contain `Data_Chan1.txt` and `Data_Chan2.txt`. Channel 1 is used for ID/OOD evaluation and channel 2 for distribution shift. The first 14 header lines are skipped.
 
+Use the XJTUGearbox release linked above, not the XJTU-SY run-to-failure dataset.
+
 The default XJTU limits are 500 ID windows per class file, 800 OOD windows from
 the compound-fault file and 500 shift windows per class file. Uniform selection
 is applied over the complete recording before temporal splitting. The limits
@@ -145,13 +157,18 @@ data5.npy  # OOD outer fault
 
 Each array is expected to have shape `N × 6 × 20480`. The loader selects channels and truncates signals to the configured one-dimensional window length.
 
+The author's repository links to the complete dataset and also provides a
+single-channel MATLAB demo. The demo alone is not compatible with this loader,
+which expects the five six-channel NumPy arrays above. A MATLAB-to-NumPy
+preparation script is not currently bundled with this repository.
+
 ## CWRU
 
 Official source: [Case Western Reserve University Bearing Data Center](https://engineering.case.edu/bearingdatacenter).
 
 Point the root to the extracted 12 kHz drive-end directory containing numbered files such as `97.mat`, `105.mat`, `118.mat` and `130.mat`. Keep the original MATLAB variable names; the loader resolves the drive-end signal key from the file number.
 
-## THU
+## THU (additional support)
 
 Expected files are flat CSV recordings. Names are constructed as:
 
@@ -168,8 +185,8 @@ Before a full run:
 1. Confirm every required source file exists under the configured root.
 2. Keep the original sample order, units, delimiter and MATLAB keys.
 3. Do not place generated `.npy` caches or transformed copies in Git.
-4. Run one seed of `max_softmax` with `--epochs 1 --no-eval-noise`.
-5. Confirm that `manifest.json`, `runs.csv` and `seed0/predictions/clean.npz` are produced.
+4. Run one seed of `max_softmax` with `--epochs 1 --seeds 0 --no-eval-noise --no-eval-shift --output-dir ./tmp/smoke_results`, as shown in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+5. Confirm that `manifest.json`, `runs.csv` and `seed0/predictions/clean.npz` are produced below `tmp/smoke_results/<dataset>/<backbone>/max_softmax/`.
 6. Record the dataset provider, version/download date and citation with published results.
 
 MGB, WT, XJTU, HIT, SEU and THU source distributions are not mirrored here. If their provider requires an application, institutional access or a separate agreement, those terms take precedence over this documentation.

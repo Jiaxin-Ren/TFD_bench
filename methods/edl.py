@@ -61,7 +61,11 @@ if __name__ == "__main__":
     parser = add_experiment_args(add_common_args(argparse.ArgumentParser()))
     parser.add_argument("--reg-weight", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--loss-type", choices=["digamma", "log", "mse"], default="digamma")
+    parser.add_argument("--loss-type", choices=["digamma", "log", "mse"], default="mse")
+    # Keep the validation-selected dataset exception as a code default.
+    selected, _ = parser.parse_known_args()
+    if selected.dataset == "xjtu":
+        parser.set_defaults(loss_type="digamma")
     args = parser.parse_args()
     print_gpu_config(load_gpu_config(args))
     run(args)

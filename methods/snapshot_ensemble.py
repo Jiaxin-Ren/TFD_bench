@@ -44,6 +44,10 @@ def run(args):
 if __name__ == "__main__":
     parser = add_experiment_args(add_common_args(argparse.ArgumentParser()))
     parser.add_argument("--cycle-length", type=int, default=5)
+    # Keep the validation-selected dataset exceptions as code defaults.
+    selected, _ = parser.parse_known_args()
+    if selected.dataset in {"pu", "xjtu", "cwru"}:
+        parser.set_defaults(cycle_length=10)
     args = parser.parse_args()
     print_gpu_config(load_gpu_config(args))
     run(args)

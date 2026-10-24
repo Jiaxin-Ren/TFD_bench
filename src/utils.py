@@ -78,12 +78,12 @@ def add_common_args(parser: argparse.ArgumentParser, config_path: str = None) ->
     先加载配置文件，命令行参数可覆盖。
     """
     # Resolve --config before constructing the main parser so that every
-    # default comes from the user-selected file rather than always default.yaml.
-    if config_path is None:
-        config_parser = argparse.ArgumentParser(add_help=False)
-        config_parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
-        config_path, _ = config_parser.parse_known_args()
-        config_path = config_path.config
+    # default comes from the user-selected file rather than a fixed repository default.
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", default=config_path or DEFAULT_CONFIG_PATH)
+    config_parser.add_argument("--dataset", default=None)
+    selected, _ = config_parser.parse_known_args()
+    config_path = selected.config
 
     # Load config for defaults
     config = load_config(config_path)
@@ -93,6 +93,15 @@ def add_common_args(parser: argparse.ArgumentParser, config_path: str = None) ->
         if configured_datasets and isinstance(configured_datasets[0], dict)
         else config.get("dataset", {})
     )
+    if selected.dataset is not None:
+        dataset_cfg = next(
+            (
+                item for item in configured_datasets
+                if isinstance(item, dict) and item.get("name") == selected.dataset
+            ),
+            dataset_cfg if dataset_cfg.get("name") == selected.dataset
+            else {"name": selected.dataset},
+        )
     training_cfg = config.get("training", {})
     evaluation_cfg = config.get("evaluation", {})
     gpu_cfg = config.get("hardware", config.get("gpu", {}))

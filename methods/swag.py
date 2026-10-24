@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser = add_experiment_args(add_common_args(argparse.ArgumentParser()))
     parser.add_argument("--cycle-start", type=int, default=25)
     parser.add_argument("--cycle-length", type=int, default=1)
-    parser.add_argument("--num-estimators", type=int, default=16)
+    parser.add_argument("--num-estimators", type=int, default=10)
     args = parser.parse_args()
     print_gpu_config(load_gpu_config(args))
     run(args)

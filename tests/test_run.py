@@ -16,7 +16,8 @@ import yaml
 
 import run as benchmark_run
 from methods.sghmc import planned_collection_size, validate_collection_schedule
-from src.utils import add_common_args
+from src.training.experiment import add_experiment_args
+from src.utils import DEFAULT_CONFIG_PATH, add_common_args
 
 
 class RunConfigTests(unittest.TestCase):
@@ -339,6 +340,195 @@ class RunConfigTests(unittest.TestCase):
                     missing.append(f"{path.name}:{node.lineno}")
 
         self.assertEqual(missing, [])
+
+
+class MethodParameterTests(unittest.TestCase):
+    project_root = Path(__file__).resolve().parents[1]
+    default_path = project_root / "configs" / "default.yaml"
+    tuning_path = project_root / "configs" / "tuning.yaml"
+
+    def parse_method(self, method: str, arguments: list[str]):
+        """Execute the real script's parser setup without importing/running models."""
+        path = self.project_root / "methods" / f"{method}.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        main = next(
+            node for node in tree.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and isinstance(node.test.left, ast.Name)
+            and node.test.left.id == "__name__"
+        )
+        statements = []
+        for statement in main.body:
+            if (
+                isinstance(statement, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "args"
+                        for target in statement.targets)
+            ):
+                self.assertIsInstance(statement.value, ast.Call)
+                self.assertIsInstance(statement.value.func, ast.Attribute)
+                self.assertEqual(statement.value.func.value.id, "parser")
+                self.assertEqual(statement.value.func.attr, "parse_args")
+                statements.append(statement)
+                break
+            statements.append(statement)
+        namespace = {
+            "argparse": argparse,
+            "add_common_args": add_common_args,
+            "add_experiment_args": add_experiment_args,
+        }
+        with patch("sys.argv", [str(path), *arguments]):
+            exec(compile(ast.Module(body=statements, type_ignores=[]), str(path), "exec"), namespace)
+            return namespace["args"]
+
+    def test_default_entry_points_use_default_config(self) -> None:
+        self.assertEqual(benchmark_run.DEFAULT_CONFIG, self.default_path)
+        self.assertEqual(Path(DEFAULT_CONFIG_PATH), self.default_path)
+
+    def test_default_and_tuning_configs_are_equivalent(self) -> None:
+        self.assertEqual(
+            benchmark_run.load_config(self.default_path),
+            benchmark_run.load_config(self.tuning_path),
+        )
+
+    def test_all_method_fallbacks_match_tuning(self) -> None:
+        config = benchmark_run.load_config(self.tuning_path)
+        for method, parameters in config["method_args"].items():
+            with self.subTest(method=method):
+                args = self.parse_method(method, ["--dataset", "seu"])
+                path = self.project_root / "methods" / f"{method}.py"
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                defaults = {}
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "add_argument"):
+                        for keyword in node.keywords:
+                            if keyword.arg == "default":
+                                key = ast.literal_eval(node.args[0]).removeprefix("--").replace("-", "_")
+                                defaults[key] = ast.literal_eval(keyword.value)
+                for key, expected in parameters.items():
+                    self.assertEqual(defaults[key], expected, f"{method}.{key}")
+                    self.assertEqual(getattr(args, key), expected, f"{method}.{key}")
+
+    def test_standalone_and_matrix_parameters_match_for_all_84_jobs(self) -> None:
+        config = benchmark_run.load_config(self.tuning_path)
+        commands = benchmark_run.build_commands(self.tuning_path, config)
+        self.assertEqual(len(commands), 84)
+        for command in commands:
+            dataset, method, _ = benchmark_run.command_identity(command)
+            with self.subTest(method=method, dataset=dataset):
+                standalone = self.parse_method(method, [
+                    "--config", str(self.tuning_path), "--dataset", dataset,
+                ])
+                matrix = self.parse_method(method, command[2:])
+                self.assertEqual(vars(standalone), vars(matrix))
+                self.assertEqual(standalone.epochs, 50)
+                self.assertEqual(standalone.batch_size, 128)
+                self.assertEqual(standalone.seeds, [0, 1, 2, 3, 4])
+
+    def test_dataset_specific_parameters_and_roots(self) -> None:
+        for method, dataset, parameter, expected in (
+            ("edl", "seu", "loss_type", "mse"),
+            ("edl", "xjtu", "loss_type", "digamma"),
+            ("snapshot_ensemble", "seu", "cycle_length", 5),
+            ("snapshot_ensemble", "pu", "cycle_length", 10),
+            ("snapshot_ensemble", "xjtu", "cycle_length", 10),
+            ("snapshot_ensemble", "cwru", "cycle_length", 10),
+            ("sghmc", "seu", "friction", 0.05),
+            ("sghmc", "xjtu", "friction", 0.1),
+        ):
+            with self.subTest(method=method, dataset=dataset):
+                args = self.parse_method(method, ["--dataset", dataset])
+                self.assertEqual(getattr(args, parameter), expected)
+                self.assertEqual(args.data_root, f"/mnt/d/Data/Machine/{dataset.upper()}")
+
+    def test_custom_config_and_explicit_cli_priority(self) -> None:
+        payload = {
+            "datasets": [
+                {"name": "seu", "root": "./SEU"},
+                {"name": "pu", "root": "./PU", "max_id_windows_per_file": 50,
+                 "max_ood_windows_per_file": 20, "max_shift_windows_per_file": 30,
+                 "split_mode": "temporal", "ood_subset": "near"},
+            ],
+            "training": {"epochs": 17, "batch_size": 7, "learning_rate": 0.002,
+                         "n_runs": 2, "seeds": [11, 12], "val_split": 0.1},
+            "evaluation": {"noise": False, "shift": False},
+            "method_args": {"edl": {"reg_weight": 0.02, "loss_type": "mse"}},
+            "method_dataset_args": {"edl": {"pu": {"loss_type": "log"}}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "custom.yaml"
+            path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            arguments = ["--config", str(path), "--dataset", "pu"]
+            args = self.parse_method("edl", arguments)
+            self.assertEqual((args.epochs, args.batch_size, args.lr), (17, 7, 0.002))
+            self.assertEqual((args.n_runs, args.seeds, args.val_split), (2, [11, 12], 0.1))
+            self.assertEqual((args.reg_weight, args.loss_type), (1e-5, "mse"))
+            self.assertEqual(args.data_root, "./PU")
+            self.assertEqual(args.max_id_windows_per_file, 50)
+            self.assertEqual(args.max_ood_windows_per_file, 20)
+            self.assertEqual(args.max_shift_windows_per_file, 30)
+            self.assertEqual((args.split_mode, args.ood_subset), ("temporal", "near"))
+            self.assertFalse(args.eval_noise)
+            self.assertFalse(args.eval_shift)
+            overridden = self.parse_method("edl", [
+                *arguments, "--epochs", "3", "--data-root", "./manual",
+                "--reg-weight", "0.7", "--loss-type", "digamma",
+                "--eval-noise", "--eval-shift",
+            ])
+            self.assertEqual((overridden.epochs, overridden.data_root), (3, "./manual"))
+            self.assertEqual((overridden.reg_weight, overridden.loss_type), (0.7, "digamma"))
+            self.assertTrue(overridden.eval_noise)
+            self.assertTrue(overridden.eval_shift)
+
+    def test_boolean_cli_overrides_method_default(self) -> None:
+        args = self.parse_method("mc_batch_norm", ["--no-last-only", "--num-estimators", "3"])
+        self.assertFalse(args.last_only)
+        self.assertEqual(args.num_estimators, 3)
+
+    def test_yaml_method_settings_do_not_change_standalone_defaults(self) -> None:
+        payload = {
+            "method_args": {
+                "edl": {"reg_weight": 0.7, "weight_decay": 0.1, "loss_type": "log"},
+                "snapshot_ensemble": {"cycle_length": 13},
+                "sghmc": {"friction": 0.9},
+                "mc_dropout": {"num_estimators": 99, "dropout_rate": 0.8},
+                "mc_batch_norm": {"last_only": False},
+            },
+            "method_dataset_args": {
+                "edl": {"xjtu": {"loss_type": "mse"}},
+                "snapshot_ensemble": {"pu": {"cycle_length": 17}},
+                "sghmc": {"xjtu": {"friction": 0.8}},
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "custom.yaml"
+            path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+            for method, dataset, expected in (
+                ("edl", "seu", {"reg_weight": 1e-5, "weight_decay": 0.0, "loss_type": "mse"}),
+                ("edl", "xjtu", {"loss_type": "digamma"}),
+                ("snapshot_ensemble", "pu", {"cycle_length": 10}),
+                ("sghmc", "xjtu", {"friction": 0.1}),
+                ("mc_dropout", "seu", {"num_estimators": 10, "dropout_rate": 0.1}),
+                ("mc_batch_norm", "seu", {"last_only": True}),
+            ):
+                with self.subTest(method=method, dataset=dataset):
+                    args = self.parse_method(method, [
+                        "--config", str(path), "--dataset", dataset,
+                    ])
+                    for key, value in expected.items():
+                        self.assertEqual(getattr(args, key), value, f"{method}.{key}")
+
+    def test_cli_overrides_dataset_specific_script_defaults(self) -> None:
+        for method, dataset, option, value, parameter, expected in (
+            ("edl", "xjtu", "--loss-type", "log", "loss_type", "log"),
+            ("snapshot_ensemble", "pu", "--cycle-length", "7", "cycle_length", 7),
+            ("sghmc", "xjtu", "--friction", "0.2", "friction", 0.2),
+        ):
+            with self.subTest(method=method, dataset=dataset):
+                args = self.parse_method(method, ["--dataset", dataset, option, value])
+                self.assertEqual(getattr(args, parameter), expected)
 
 
 if __name__ == "__main__":

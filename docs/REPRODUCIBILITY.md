@@ -1,6 +1,9 @@
 # Reproducibility Guide
 
-This document defines the minimum procedure for reproducing TFD-Bench experiments.
+This document describes how to run the experiments accompanying the MSSP
+manuscript. The formal evaluation covers six datasets (SEU, WT, PU, XJTU, HIT and
+CWRU), fourteen methods including MSP, and a shared one-dimensional ResNet backbone.
+MGB and THU are additional supported loaders, outside this six-dataset evaluation.
 
 ## 1. Environment
 
@@ -50,14 +53,23 @@ python methods/max_softmax.py \
   --seeds 0 \
   --accelerator cpu \
   --devices 1 \
-  --no-eval-noise
+  --no-eval-noise \
+  --no-eval-shift \
+  --output-dir ./tmp/smoke_results
 ```
 
-This smoke run checks the data loader, training loop, checkpoint selection, clean ID/OOD evaluation and schema-v2 result writer. It is not a benchmark result.
+This smoke run checks the data loader, training loop, checkpoint selection, clean ID/OOD evaluation and schema-v2 result writer. Its output is separate from the formal results in `results/`; it is not a benchmark result.
 
 ## 4. Run the benchmark
 
-Copy the configuration before changing it so the exact experiment definition can be archived:
+The matrix runner and shared arguments default to `configs/default.yaml`.
+Standalone methods take method-specific defaults directly from their scripts,
+including any dataset-specific defaults defined there; explicit command-line
+options override them. The matrix runner applies YAML `method_args` and then
+`method_dataset_args` as command-line options, so dataset-specific YAML values
+take precedence over shared method values. Standalone methods do not automatically
+apply those two YAML sections. Copy the configuration before changing it so the
+exact experiment definition can be archived:
 
 ```bash
 cp configs/default.yaml configs/my_experiment.yaml
@@ -65,16 +77,37 @@ python run.py --config configs/my_experiment.yaml --dry-run
 python run.py --config configs/my_experiment.yaml
 ```
 
+The shared training configuration specifies 50 epochs and seeds 0 through 4.
+SGLD and SGHMC use an additional 20-epoch deterministic pretraining stage followed
+by 50 sampling-stage epochs. SWAG collects its posterior approximation during its
+50-epoch training run and has no separate deterministic pretraining stage. An
+alternative YAML can be selected explicitly, for example
+`python run.py --config configs/tuning.yaml`.
+
+By default, `runner.overwrite: true` replaces the selected
+`results/<dataset>/<backbone>/<method>/` directories. To keep previous experiments,
+choose a separate `output.dir` before running. Setting `runner.overwrite: false`
+disables the initial directory removal; it does not create a separate experiment
+archive or guarantee that same-named output files will be preserved.
+
 For a fair method comparison, keep these fields identical across methods:
 
 - dataset roots and ID/OOD definitions;
 - backbone and input preprocessing;
-- training epochs, batch size and validation split;
+- shared training settings, batch size and validation split;
 - seed list;
-- ensemble/posterior estimator count where applicable;
 - noise types and severities.
 
-Normal methods select the checkpoint with minimum validation NLL. SGLD, SGHMC and SWAG evaluate the complete posterior sample collection produced after their collection schedule; their deterministic pretraining checkpoint is still selected by validation NLL. Test and OOD metrics never select checkpoints.
+Keep each method's documented training stages and estimator budget. Estimator
+counts are method-specific: for example, DE, PE and BE use four members, whereas
+several posterior and Monte Carlo methods use ten samples. They are not required
+to be identical across all methods.
+
+Conventional methods select the checkpoint with minimum validation NLL. SGLD and
+SGHMC also select their deterministic pretraining checkpoint by validation NLL,
+then evaluate the posterior sample collection produced by the sampling stage.
+SWAG evaluates its collected posterior approximation. Test and OOD metrics never
+select checkpoints.
 
 ## 5. Result contract
 
@@ -88,13 +121,25 @@ results/<dataset>/<backbone>/<method>/
 └── seed<N>/
     ├── metrics.csv
     ├── predictions/<config>.npz
-    ├── ckpt/
-    └── logs/
+    ├── ckpt/                  # Validation-selected checkpoint, where applicable
+    └── logs/                  # Training logs; sampler checkpoints in checkpoints/
 ```
 
 `manifest.json` records schema version, arguments, seeds and completion status. `runs.csv` is the canonical method-level raw table. `summary.csv` is a tidy mean/std/count table. Prediction archives retain per-sample probabilities, labels and uncertainty scores for independent numerical verification.
 
-Primary comparison metrics are ACC, ECE and OOD AUROC. OOD output also includes overall AUROC, per-source AUROC and macro AUROC. Report the configured seed count and do not silently combine results produced with different configurations.
+Prediction configurations include `clean`, `gaussian_s1` through `gaussian_s5`
+(14, 12, 10, 8 and 6 dB), and `operating_shift`. XJTU's `operating_shift` archive
+represents a sensor-position shift; the other five datasets use conventional
+operating-condition shifts. Temperature scaling retains both `baseline_<config>`
+and `after_<config>` outputs.
+
+The paper evaluates four dimensions: closed-set classification (ACC), confidence
+calibration (ECE), OOD detection (AUROC), and selective classification (AURC).
+NLL and the Brier score complement these with measures of predictive probability
+quality. All six metrics are retained for clean and Gaussian-noise evaluation.
+The shift evaluation retains known fault classes and does not compute OOD AUROC.
+Additional OOD outputs include per-source and macro AUROC. Report the configured
+seed count and do not silently combine results produced with different configurations.
 
 ## 6. Collect results and generate tables
 
@@ -111,6 +156,14 @@ results/tables/table.md
 ```
 
 Result collection and table generation are separate from training and do not overwrite method checkpoints.
+
+The collector retains all available metrics. The table generator displays only
+ACC, ECE and AUROC by default; this display choice does not limit the training
+outputs. To show all six metrics:
+
+```bash
+python analysis/generate_tables.py --metrics test/cls/Acc test/cls/NLL test/cls/Brier test/cal/ECE ood/AUROC test/sc/AURC
+```
 
 ## 7. Archive a reproducible run
 

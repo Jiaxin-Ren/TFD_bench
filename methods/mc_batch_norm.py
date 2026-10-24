@@ -45,7 +45,7 @@ def run(args):
 
 if __name__ == "__main__":
     parser = add_experiment_args(add_common_args(argparse.ArgumentParser()))
-    parser.add_argument("--num-estimators", type=int, default=8)
+    parser.add_argument("--num-estimators", type=int, default=10)
     parser.add_argument("--mc-batch-size", type=int, default=4)
     parser.add_argument("--last-only", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()

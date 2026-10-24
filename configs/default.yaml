@@ -1,5 +1,6 @@
 # One-click experiment configuration
 # Run: python run.py
+# Parameter values match the validation-selected configs/tuning.yaml.
 
 # Run every selected dataset × method × backbone combination.
 methods:
@@ -101,9 +102,9 @@ method_args:
     noise_factor: 0.01
     num_estimators: 10
   edl:
-    reg_weight: 0.01
-    weight_decay: 0.005
-    loss_type: digamma
+    reg_weight: 0.00001
+    weight_decay: 0.0
+    loss_type: mse
   laplace_approx:
     weight_subset: last_layer
     hessian_struct: kron
@@ -119,22 +120,22 @@ method_args:
     mc_batch_size: 4
     last_only: true
 
-# Optional method-specific overrides for individual datasets. Keep shared
+# Method-specific overrides for individual datasets. Keep shared
 # training, evaluation, and hardware parameters in their sections above.
-# Copy this file to configs/tuning.yaml and add tuned values there, for example:
-# method_dataset_args:
-#   edl:
-#     seu:
-#       reg_weight: 0.01
-#       weight_decay: 0.005
-#     pu:
-#       reg_weight: 0.001
-#       weight_decay: 0.001
-#   mc_dropout:
-#     seu:
-#       dropout_rate: 0.1
-#     pu:
-#       dropout_rate: 0.2
+method_dataset_args:
+  edl:
+    xjtu:
+      loss_type: digamma
+  snapshot_ensemble:
+    pu:
+      cycle_length: 10
+    xjtu:
+      cycle_length: 10
+    cwru:
+      cycle_length: 10
+  sghmc:
+    xjtu:
+      friction: 0.1
 
 runner:
   continue_on_error: true

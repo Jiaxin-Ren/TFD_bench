@@ -63,7 +63,7 @@ if __name__ == "__main__":
     parser.add_argument("--cycle-start", type=int, default=5)
     parser.add_argument("--cycle-length", type=int, default=5)
     parser.add_argument("--noise-factor", type=float, default=1e-2)
-    parser.add_argument("--num-estimators", type=int, default=16)
+    parser.add_argument("--num-estimators", type=int, default=10)
     args = parser.parse_args()
     print_gpu_config(load_gpu_config(args))
     run(args)
