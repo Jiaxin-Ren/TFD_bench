@@ -1,7 +1,6 @@
 # Beyond classification accuracy: Benchmarking uncertainty quantification for trustworthy mechanical fault diagnosis
 
-**TFD-Bench** is the research code accompanying the manuscript above, prepared for
-*Mechanical Systems and Signal Processing* (MSSP). It benchmarks uncertainty
+**TFD-Bench** is the research code accompanying the manuscript above. It benchmarks uncertainty
 quantification (UQ) for mechanical fault diagnosis beyond classification
 accuracy: whether predictive confidence is reliable, unknown faults can be
 identified, and uncertain predictions can be deferred for further inspection.
